@@ -120,8 +120,14 @@ normalize_version() {
     echo "$input" | sed -E 's/^(v|release-)//'
 }
 
-# Find release URL by version number
-find_release_by_version() {
+# Check if a user's input suggests they want pre-releases
+user_wants_prereleases() {
+    local input="$1"
+    [[ "$input" =~ (rc|beta|alpha) ]]
+}
+
+# Get URL for a specific version with smart suggestions
+get_url_for_version() {
     local target_version="$1"
     local releases
     releases=$(get_releases)
@@ -153,8 +159,11 @@ find_release_by_version() {
         return 0
     fi
     
-    # If no exact match, look for partial matches and suggest alternatives
+    # Smart suggestion strategy based on user intent
     local suggestions=()
+    local wants_prereleases
+    wants_prereleases=$(user_wants_prereleases "$1")  # Use original input
+    
     while IFS= read -r line; do
         local tag_name
         tag_name=$(echo "$line" | jq -r '.name')
@@ -162,9 +171,35 @@ find_release_by_version() {
         
         # Check if version starts with target (e.g., 5.0 matches 5.0.4, 5.0.5)
         if [[ "$version" =~ ^${target_version} ]]; then
-            suggestions+=("$version")
+            # Apply smart filtering based on user intent
+            if [[ "$wants_prereleases" == true ]]; then
+                # User wants pre-releases - show them first, then stable
+                if [[ "$tag_name" =~ (rc|beta|alpha) ]]; then
+                    suggestions=("$version" "${suggestions[@]}")  # Prepend pre-releases
+                else
+                    suggestions+=("$version")  # Append stable releases
+                fi
+            else
+                # User wants stable releases only (unless very few matches)
+                if [[ ! "$tag_name" =~ (rc|beta|alpha) ]]; then
+                    suggestions+=("$version")
+                fi
+            fi
         fi
     done < <(echo "$releases" | jq -c '.[]')
+    
+    # If no stable releases found and user didn't ask for pre-releases, include pre-releases as fallback
+    if [[ ${#suggestions[@]} -eq 0 ]] && [[ "$wants_prereleases" == false ]]; then
+        while IFS= read -r line; do
+            local tag_name
+            tag_name=$(echo "$line" | jq -r '.name')
+            version=$(echo "$tag_name" | sed 's/^release-//')
+            
+            if [[ "$version" =~ ^${target_version} ]]; then
+                suggestions+=("$version")
+            fi
+        done < <(echo "$releases" | jq -c '.[]')
+    fi
     
     # Show suggestions if any found
     if [[ ${#suggestions[@]} -gt 0 ]]; then
@@ -177,6 +212,12 @@ find_release_by_version() {
     fi
     
     return 1
+}
+
+# Find release URL by version number
+find_release_by_version() {
+    local target_version="$1"
+    get_url_for_version "$target_version"
 }
 
 # Check if input looks like a direct tarball URL
@@ -351,6 +392,7 @@ find_release_by_major_version() {
 # Download and extract source
 download_and_extract() {
     local url="$1"
+    local version="${2:-}"
     local cache_key
     cache_key=$(echo "$url" | sha256sum | cut -d' ' -f1)
     local cache_file="$CACHE_DIR/$cache_key.tar.gz"
@@ -551,6 +593,110 @@ generate_client_config() {
         }'
 }
 
+# Batch update function for automation
+run_batch_update() {
+    local clients_dir="$1"
+    
+    if [[ ! -d "$clients_dir" ]]; then
+        error_exit "Directory not found: $clients_dir"
+    fi
+    
+    info "Starting batch update for directory: $clients_dir"
+    
+    # Get list of existing client files and extract versions
+    local existing_versions=()
+    if ls "$clients_dir"/qbittorrent-*.client >/dev/null 2>&1; then
+        while IFS= read -r file; do
+            local version
+            version=$(basename "$file" | sed 's/qbittorrent-\(.*\)\.client/\1/')
+            existing_versions+=("$version")
+        done < <(ls "$clients_dir"/qbittorrent-*.client)
+        
+        info "Found ${#existing_versions[@]} existing client files"
+    else
+        info "No existing client files found"
+    fi
+    
+    # Get all stable releases from GitHub API
+    local releases
+    releases=$(get_releases)
+    
+    local all_stable_versions=()
+    while IFS= read -r line; do
+        local tag_name
+        tag_name=$(echo "$line" | jq -r '.name')
+        
+        if is_stable_release "$tag_name"; then
+            local version
+            version=$(echo "$tag_name" | sed 's/^release-//')
+            all_stable_versions+=("$version")
+        fi
+    done < <(echo "$releases" | jq -c '.[]')
+    
+    info "Found ${#all_stable_versions[@]} stable releases on GitHub"
+    
+    # Find missing versions
+    local missing_versions=()
+    for version in "${all_stable_versions[@]}"; do
+        local found=false
+        for existing in "${existing_versions[@]}"; do
+            if [[ "$version" == "$existing" ]]; then
+                found=true
+                break
+            fi
+        done
+        
+        if [[ "$found" == false ]]; then
+            missing_versions+=("$version")
+        fi
+    done
+    
+    if [[ ${#missing_versions[@]} -eq 0 ]]; then
+        info "No missing versions found. All stable releases are up to date!"
+        return 0
+    fi
+    
+    info "Found ${#missing_versions[@]} missing versions: ${missing_versions[*]}"
+    
+    # Process each missing version
+    local processed=0
+    for version in "${missing_versions[@]}"; do
+        info "Processing version: ${version}..."
+        
+        # Get the tarball URL for this version
+        local url
+        url=$(find_release_by_version "$version")
+        if [[ $? -ne 0 ]]; then
+            warn "Could not find URL for version $version, skipping..."
+            continue
+        fi
+        
+        # Download and extract the source
+        local source_dir
+        source_dir=$(download_and_extract "$url" "$version")
+        
+        # Extract protocol information (this returns JSON to stdout)
+        local protocol_info_json
+        protocol_info_json=$(extract_protocol_info "$source_dir" "$version")
+        
+        # Parse the peer_id_prefix from the JSON
+        local peer_id_prefix
+        peer_id_prefix=$(echo "$protocol_info_json" | jq -r '.peer_id_prefix')
+        
+        # Generate client configuration file
+        local output_file="${clients_dir}/qbittorrent-${version}.client"
+        generate_client_config "$version" "$peer_id_prefix" > "$output_file"
+        
+        info "Generated: $(basename "$output_file")"
+        processed=$((processed + 1))
+        
+        # Clean up temp directory for next iteration
+        cleanup
+    done
+    
+    info "Batch update complete! Processed $processed new client files."
+}
+
 # Format output
 format_output() {
     local format="$1"
@@ -597,6 +743,7 @@ Options:
     --force-latest          Use absolute latest release (including pre-releases)
     --no-cache              Disable caching
     --clear-cache           Clear download cache and exit
+    --batch-update DIR      Scan directory for existing .client files and generate missing ones
 
 Arguments:
     URL|VERSION             GitHub API tarball URL, release API endpoint, or version number
@@ -612,6 +759,7 @@ Examples:
     $0 --list-releases                          # Show available releases
     $0 --clear-cache                            # Clear download cache
     $0 --output json 5.0.4                      # Specific version with JSON output
+    $0 --batch-update /resources/clients        # Automated batch processing for GitHub Actions
     $0 https://api.github.com/repos/qbittorrent/qBittorrent/tarball/refs/tags/release-4.6.2
 
 EOF
@@ -623,6 +771,7 @@ main() {
     local list_releases_flag=false
     local force_latest=false
     local clear_cache_flag=false
+    local batch_update_dir=""
     
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -663,6 +812,10 @@ main() {
                 clear_cache_flag=true
                 shift
                 ;;
+            --batch-update)
+                batch_update_dir="$2"
+                shift 2
+                ;;
             -*)
                 error_exit "Unknown option: $1"
                 ;;
@@ -698,6 +851,12 @@ main() {
     # Handle clear cache
     if [[ "$clear_cache_flag" == true ]]; then
         clear_cache
+        exit 0
+    fi
+    
+    # Handle batch update
+    if [[ -n "$batch_update_dir" ]]; then
+        run_batch_update "$batch_update_dir"
         exit 0
     fi
     
