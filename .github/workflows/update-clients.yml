@@ -1,0 +1,58 @@
+name: Update qBittorrent Clients
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch: {} # Allow manual triggering
+
+jobs:
+  update-clients:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+          
+      - name: Generate Missing Client Files
+        id: generate
+        run: |
+          chmod +x ./scripts/bittorrent-client-update-detector/qbittorrent_analyzer.sh
+          ./scripts/bittorrent-client-update-detector/qbittorrent_analyzer.sh --batch-update resources/clients
+          
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "Changed files:"
+            git status --porcelain
+          else
+            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "No changes detected"
+          fi
+          
+      - name: Commit and Push Changes
+        if: steps.check_changes.outputs.changes == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add resources/clients/
+          git commit -m "Auto-update: Add missing qBittorrent client files
+          
+          - Generated client configurations for newly released versions
+          - Updated by GitHub Action on $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          git push
+          
+      - name: Summary
+        run: |
+          if [[ "${{ steps.check_changes.outputs.changes }}" == "true" ]]; then
+            echo "✅ Successfully updated client files and committed changes"
+          else
+            echo "ℹ️  No new qBittorrent versions found - all client files are up to date"
+          fi
