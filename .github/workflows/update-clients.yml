@@ -51,7 +51,7 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add resources/clients/
-          git commit -m "Auto-update: Add missing qBittorrent client files
+          git commit -m "Auto-update: Added missing qBittorrent client files
           
           - Generated client configurations for newly released versions
           - Updated by GitHub Action on $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
