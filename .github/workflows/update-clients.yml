@@ -94,7 +94,7 @@ jobs:
             echo "skip_commit=true" >> $GITHUB_OUTPUT
           else
             echo "Staging changes for commit..."
-            git status --cached
+            git diff --cached --name-only
             
             # Use a commit template that works across forks
             TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
