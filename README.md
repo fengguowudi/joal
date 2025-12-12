@@ -112,6 +112,52 @@ The application configuration belongs in `joal-conf/config.json`.
 - `keepTorrentWithZeroLeechers`: should JOAL keep torrent with no leechers or seeders. If yes, torrent with no peers will be seed at 0kB/s. If false torrents will be deleted on 0 peers reached. (**required**)
 - `uploadRatioTarget`: when JOAL has uploaded X times the size of the torrent **in a single session**, the torrent is removed. If -1.0 torrents are never removed.
 
+## Proxy Configuration
+
+You can route JOAL traffic (tracker announcements and IP checks) through an HTTP/HTTPS proxy. This is particularly useful if you run JOAL behind a VPN container (like Gluetun) or want to hide your real IP address.
+
+To enable the proxy, set the `JAVA_TOOL_OPTIONS` environment variable with standard Java proxy properties.
+
+### Docker Run Example
+
+```bash
+docker run -d \
+    -p PORT:PORT \
+    -v PATH_TO_CONF:/data \
+    -e "JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=10.10.10.10 -Dhttp.proxyPort=8888 -Dhttp.nonProxyHosts=localhost|127.*" \
+    --name="joal" \
+    anthonyraymond/joal:X.X.X \
+    --joal-conf="/data" \
+    --spring.main.web-environment=true \
+    --server.port="PORT" \
+    --joal.ui.path.prefix="SECRET_OBFUSCATION_PATH" \
+    --joal.ui.secret-token="SECRET_TOKEN" \
+```
+
+### Docker Compose Example
+```yaml
+version: "2"
+services:
+  joal:
+    image: anthonyraymond/joal:X.X.X
+    container_name: joal
+    restart: unless-stopped
+    environment:
+      # Configure the Proxy Host and Port here
+      # Important: You MUST configure 'http.nonProxyHosts' to exclude localhost, 
+      # otherwise the internal Web UI might become unreachable.
+      - JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=10.10.10.10 -Dhttp.proxyPort=8888 -Dhttp.nonProxyHosts="localhost|127.*|10.*|192.168.*"
+    volumes:
+      - PATH_TO_CONF:/data
+    ports:
+      - PORT:PORT
+    command: ["--joal-conf=/data", "--spring.main.web-environment=true", "--server.port=PORT", "--joal.ui.path.prefix=SECRET_OBFUSCATION_PATH", "--joal.ui.secret-token=SECRET_TOKEN"]
+```
+### Supported Properties
+
+* `-Dhttp.proxyHost`: The hostname or IP address of your proxy server.
+* `-Dhttp.proxyPort`: The port of your proxy server.
+* `-Dhttp.nonProxyHosts`: A pipe-separated list (`|`) of hosts that should be reached directly (bypassing the proxy). **It is highly recommended to include `localhost` and `127.*` to ensure the Web UI works correctly.**
 
 
 ## Supported browser (for web-ui)
