@@ -18,6 +18,8 @@ import javax.inject.Inject;
 @Configuration
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+    // Allow large payloads (e.g., torrent files) to travel through the WebSocket channel without a tight cap.
+    private static final int NO_MESSAGE_SIZE_LIMIT = Integer.MAX_VALUE;
     private final String webSocketPathPrefix;
 
     @Inject
@@ -28,8 +30,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void configureWebSocketTransport(final WebSocketTransportRegistration registration) {
         registration
-                .setMessageSizeLimit(5000 * 1024) // Max incoming message size => 5Mo
-                .setSendBufferSizeLimit(5000 * 1024); // Max outgoing buffer size => 5Mo
+                .setMessageSizeLimit(NO_MESSAGE_SIZE_LIMIT)
+                .setSendBufferSizeLimit(NO_MESSAGE_SIZE_LIMIT);
     }
 
     @Override
