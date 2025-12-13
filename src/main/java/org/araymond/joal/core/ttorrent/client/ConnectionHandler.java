@@ -63,13 +63,14 @@ public class ConnectionHandler {
 
         // TODO: use @Scheduled
         this.ipFetcherThread = new Thread(() -> {
-            while (this.ipFetcherThread == null || !this.ipFetcherThread.isInterrupted()) {
+            while (!Thread.currentThread().isInterrupted()) {
                 try {
                     MINUTES.sleep(90);  // TODO: move to config
                     this.ipAddress = this.fetchIp();
                 } catch (final UnknownHostException e) {
                     log.warn("Failed to fetch external IP", e);
                 } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     log.info("IP fetcher thread has been stopped");
                 }
             }
@@ -169,6 +170,12 @@ public class ConnectionHandler {
         try {
             if (this.ipFetcherThread != null) {
                 this.ipFetcherThread.interrupt();
+                try {
+                    this.ipFetcherThread.join(1000);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Interrupted while waiting for IP fetcher thread to stop", e);
+                }
             }
         } finally {
             this.ipFetcherThread = null;

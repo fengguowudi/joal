@@ -103,11 +103,13 @@ public class SeedManager {
     }
 
     public void tearDown() {
+        this.stop();
         this.connectionHandler.close();
         this.torrentFileProvider.stop();
-        if (this.client != null) {
-            this.client.stop();
-            this.client = null;
+        try {
+            this.httpClient.close();
+        } catch (final IOException e) {
+            log.warn("Failed to close HTTP client cleanly", e);
         }
     }
 
