@@ -15,14 +15,16 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 
 /**
  * This class has 2 main functions:
  * <ul>
- *     <li>establishes a socket on an open port that accepts connections</li>
- *     <li>periodically resolves our external IP address</li>
+ * <li>establishes a socket on an open port that accepts connections</li>
+ * <li>periodically resolves our external IP address</li>
  * </ul>
  * Note this port & IP will be reported back to trackers via announcements, if your client
  * {@code query} contains relevant placeholder(s).
@@ -80,7 +82,27 @@ public class ConnectionHandler {
 
     @VisibleForTesting
     InetAddress readIpFromProvider(final String providerUrl) throws IOException {
-        final URLConnection urlConnection = new URL(providerUrl).openConnection();
+        URLConnection urlConnection;
+        
+        String proxyHost = System.getProperty("http.proxyHost");
+        String proxyPortStr = System.getProperty("http.proxyPort");
+
+        if (proxyHost != null && !proxyHost.trim().isEmpty() && proxyPortStr != null) {
+            try {
+                int proxyPort = Integer.parseInt(proxyPortStr);
+                Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort));
+                
+                log.debug("ConnectionHandler fetching IP via Proxy: {}:{}", proxyHost, proxyPort);
+                
+                urlConnection = new URL(providerUrl).openConnection(proxy);
+            } catch (NumberFormatException e) {
+                log.error("Invalid Proxy Port configuration, falling back to direct connection", e);
+                urlConnection = new URL(providerUrl).openConnection();
+            }
+        } else {
+            urlConnection = new URL(providerUrl).openConnection();
+        }
+
         urlConnection.setRequestProperty("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36");  // TODO: move to config
         try (final BufferedReader in = new BufferedReader(new InputStreamReader(urlConnection.getInputStream(), Charsets.UTF_8))) {
             return InetAddress.getByName(in.readLine());
