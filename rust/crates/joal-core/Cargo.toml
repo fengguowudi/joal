@@ -21,6 +21,7 @@ serde_bytes = { workspace = true }
 
 sha1 = { workspace = true }
 percent-encoding = { workspace = true }
+regex = { workspace = true }
 
 rand = { workspace = true }
 rand_regex = { workspace = true }
@@ -33,5 +34,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+joal-testing = { path = "../joal-testing" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

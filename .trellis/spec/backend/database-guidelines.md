@@ -53,6 +53,91 @@ See `core/config/AppConfiguration.java:13` for the canonical example.
 
 ---
 
+## Scenario: Rust `.client` file compatibility
+
+### 1. Scope / Trigger
+- Trigger: `rust/crates/joal-core/src/client/**` now parses JOAL `clients/*.client` files directly, so the file-format contract is no longer "Java-only knowledge".
+- Why code-spec depth is mandatory: `.client` is a persisted cross-module contract shared by config loading, announce query construction, and golden tests.
+
+### 2. Signatures
+- `BitTorrentClientConfig::try_from(&str) -> Result<BitTorrentClientConfig, ClientError>`
+- `BitTorrentClientConfig::validate(&self) -> Result<(), ClientError>`
+- `UrlEncoder::encode(&self, &str) -> Result<String, ClientError>`
+- `UrlEncoder::encode_bytes(&self, &[u8]) -> Result<String, ClientError>`
+- `NumwantProvider::get(&self, RequestEvent) -> i32`
+
+### 3. Contracts
+- File location: `<confDirRoot>/clients/*.client`
+- File format: JSON with Java field names preserved exactly:
+  - `peerIdGenerator`
+  - `keyGenerator`
+  - `urlEncoder`
+  - `query`
+  - `requestHeaders`
+  - `numwant`
+  - `numwantOnStop`
+- `urlEncoder` contract:
+  - `encodingExclusionPattern: String`
+  - `encodedHexCase: "lower" | "upper"`
+- `peerIdGenerator` / `keyGenerator` contract:
+  - `algorithm` is serde-tagged by `type`
+  - refresh policy comes from `refreshOn`
+  - S4/S5 boundary rule: before a refresh policy is implemented correctly, parsing/validation must fail fast instead of silently emulating the wrong behavior
+- `UrlEncoder` contract:
+  - Tracker-visible bytes are encoded byte-by-byte as `%HH`
+  - ASCII bytes matching `encodingExclusionPattern` pass through unchanged
+  - Non-ASCII bytes are always percent-encoded
+  - `encode_bytes()` is the canonical path for raw `info_hash`-style data
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected result |
+|-----------|-----------------|
+| `.client` JSON is malformed | return `ClientError`, do not build a partial config |
+| `query` contains `{key}` but `keyGenerator` is absent | integrity error |
+| `urlEncoder.encodingExclusionPattern` is invalid regex | regex validation error during config load |
+| peer-id/key algorithm payload is invalid (`length <= 0`, bad regex, invalid pool/checksum config) | validation error during config load |
+| refresh policy is present but not implemented for the current stage | explicit fail-fast error, never silently downgrade to `ALWAYS` |
+| `requestHeaders` fields are present but empty strings | allow; Java only enforces non-null, not non-empty |
+
+### 5. Good / Base / Bad Cases
+- Good: `resources/clients/qbittorrent-4.5.0.client` parses unchanged and retains Java field names/casing.
+- Base: a minimal `.client` file with `peerIdGenerator`, `urlEncoder`, one request header, and a `query` without `{key}` parses without a `keyGenerator`.
+- Bad: a `.client` file that uses `{key}` in `query` but omits `keyGenerator` must fail validation.
+- Bad: treating `NEVER`, `TIMED`, `TORRENT_PERSISTENT`, or `TORRENT_VOLATILE` as if they were already equivalent to `ALWAYS`.
+
+### 6. Tests Required
+- Golden test: parse `resources/clients/*.client` and assert all repository fixtures deserialize successfully.
+- Focused golden test: assert `qbittorrent-4.5.0.client` field-by-field, including serde rename/casing.
+- Unit test: exhaustive `0x00..=0xFF` coverage for `UrlEncoder` with a real exclusion pattern.
+- Unit test: invalid regex and invalid algorithm payloads fail during config parsing/validation.
+- Unit test: unsupported pre-S5 refresh policies fail fast rather than generating incorrect peer-id/key values.
+
+### 7. Wrong vs Correct
+#### Wrong
+```rust
+// Pretends S5 refresh semantics already exist.
+match refresh_on {
+    RefreshPolicy::Always => algorithm.generate(),
+    RefreshPolicy::Never
+    | RefreshPolicy::Timed(_)
+    | RefreshPolicy::TorrentPersistent
+    | RefreshPolicy::TorrentVolatile => algorithm.generate(),
+}
+```
+
+#### Correct
+```rust
+match refresh_on {
+    RefreshPolicy::Always => algorithm.generate(),
+    other => Err(ClientError::UnsupportedRefreshPolicy(other)),
+}
+```
+
+This preserves correctness: partial implementations must stop loudly instead of producing tracker-visible behavior that looks valid but diverges from Java.
+
+---
+
 ## Writing torrent files to disk
 
 Only one path writes torrent files: `SeedManager.saveTorrentToDisk` (`core/SeedManager.java:171`). It:

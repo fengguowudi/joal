@@ -55,6 +55,8 @@ serde_bencode = "0.2"
 serde_bytes = "0.11"
 sha1 = "0.10"
 percent-encoding = "2"
+# regex engine (used by the `.client` url-encoder exclusion pattern).
+regex = "1"
 
 # serde
 serde = { version = "1", features = ["derive"] }

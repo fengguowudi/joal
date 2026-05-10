@@ -754,10 +754,12 @@ dependencies = [
 name = "joal-core"
 version = "0.1.0"
 dependencies = [
+ "joal-testing",
  "notify",
  "percent-encoding",
  "rand 0.8.6",
  "rand_regex",
+ "regex",
  "regex-syntax",
  "reqwest",
  "serde",
@@ -775,7 +777,6 @@ dependencies = [
 name = "joal-testing"
 version = "0.1.0"
 dependencies = [
- "joal-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -1132,6 +1133,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bfbd599a8c757f89100e3ae559fb1ef9efa1cfd9276136862e3089dec627b31"
 dependencies = [
  "rand 0.8.6",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
  "regex-syntax",
 ]
 

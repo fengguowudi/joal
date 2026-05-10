@@ -1,0 +1,21 @@
+//! Emulated BitTorrent client: peer-id / key / numwant generators + `.client` loader.
+//!
+//! Filled in steps **S4–S5**.
+//! Mirrors Java `org.araymond.joal.core.client.emulated`.
+
+pub mod config;
+pub mod error;
+pub mod event;
+pub mod generator;
+pub mod utils;
+
+pub use config::{BitTorrentClientConfig, HttpHeader};
+pub use error::ClientError;
+pub use event::RequestEvent;
+pub use generator::{
+    DigitRangeTransformedToHexWithoutLeadingZeroKeyAlgorithm, HashKeyAlgorithm,
+    HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef, KeyGenerator, NumwantProvider, PEER_ID_LENGTH,
+    PeerIdAlgorithmDef, PeerIdGenerator, RandomPoolWithChecksumPeerIdAlgorithm, RegexKeyAlgorithm,
+    RegexPeerIdAlgorithm, UrlEncoder,
+};
+pub use utils::Casing;
