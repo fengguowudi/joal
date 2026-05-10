@@ -23,6 +23,7 @@ fn qbittorrent_4_5_0_golden_parses_from_embedded_repository_file() {
         PeerIdGenerator::NEVER {
             algorithm: PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm { pattern }),
             should_url_encode: false,
+            ..
         } if pattern == "-qB4500-[A-Za-z0-9_~\\(\\)\\!\\.\\*-]{12}"
     ));
 
@@ -33,6 +34,7 @@ fn qbittorrent_4_5_0_golden_parses_from_embedded_repository_file() {
                 length: 8
             }),
             key_case: Casing::Upper,
+            ..
         })
     ));
 

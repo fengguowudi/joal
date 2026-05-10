@@ -1,8 +1,8 @@
 //! `.client` file configuration types.
 //!
 //! Port of Java `org.araymond.joal.core.client.emulated.BitTorrentClientConfig`.
-//! S4 only covers the static configuration + generator algorithm shell needed
-//! to deserialize existing client files and validate basic integrity.
+//! S4 introduced the static configuration shell; S5 now includes the runtime
+//! refresh semantics used by peer-id/key generators as well.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,46 +66,50 @@ impl TryFrom<&str> for BitTorrentClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::generator::{
-        HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef, PeerIdAlgorithmDef, RegexPeerIdAlgorithm,
-    };
+    use crate::client::generator::{HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef};
     use crate::client::utils::Casing;
 
     #[test]
     fn rejects_missing_key_generator_when_query_references_key() {
-        let cfg = BitTorrentClientConfig {
-            peer_id_generator: PeerIdGenerator::NEVER {
-                algorithm: PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm {
-                    pattern: "-qB4500-[A-Z]{12}".to_owned(),
-                }),
-                should_url_encode: false,
+        let json = r#"{
+            "peerIdGenerator": {
+                "refreshOn": "NEVER",
+                "algorithm": {"type": "REGEX", "pattern": "-qB4500-[A-Z]{12}"},
+                "shouldUrlEncode": false
             },
-            query: "foo={key}".to_owned(),
-            key_generator: None,
-            url_encoder: UrlEncoder::new("[A-Za-z0-9]", Casing::Lower).unwrap(),
-            request_headers: vec![],
-            numwant: 200,
-            numwant_on_stop: 0,
-        };
+            "urlEncoder": {
+                "encodingExclusionPattern": "[A-Za-z0-9]",
+                "encodedHexCase": "lower"
+            },
+            "query": "foo={key}",
+            "requestHeaders": [],
+            "numwant": 200,
+            "numwantOnStop": 0
+        }"#;
+
+        let cfg: BitTorrentClientConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn accepts_query_without_key_generator_when_key_not_used() {
-        let cfg = BitTorrentClientConfig {
-            peer_id_generator: PeerIdGenerator::NEVER {
-                algorithm: PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm {
-                    pattern: "-qB4500-[A-Z]{12}".to_owned(),
-                }),
-                should_url_encode: false,
+        let json = r#"{
+            "peerIdGenerator": {
+                "refreshOn": "NEVER",
+                "algorithm": {"type": "REGEX", "pattern": "-qB4500-[A-Z]{12}"},
+                "shouldUrlEncode": false
             },
-            query: "foo=bar".to_owned(),
-            key_generator: None,
-            url_encoder: UrlEncoder::new("[A-Za-z0-9]", Casing::Lower).unwrap(),
-            request_headers: vec![],
-            numwant: 200,
-            numwant_on_stop: 0,
-        };
+            "urlEncoder": {
+                "encodingExclusionPattern": "[A-Za-z0-9]",
+                "encodedHexCase": "lower"
+            },
+            "query": "foo=bar",
+            "requestHeaders": [],
+            "numwant": 200,
+            "numwantOnStop": 0
+        }"#;
+
+        let cfg: BitTorrentClientConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.validate().is_ok());
     }
 

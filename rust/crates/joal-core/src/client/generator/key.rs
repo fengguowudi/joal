@@ -1,9 +1,11 @@
-//! Key generation algorithms and S4 refresh-policy shell.
+//! Key generation algorithms and refresh-policy runtime semantics.
 //!
-//! Ports Java `generator/key/algorithm/*` and the parseable outer
-//! `generator/key/*` wrapper (`refreshOn`, `keyCase`). Full refresh semantics
-//! are deferred to S5; for S4 we only need the algorithm layer plus enough of
-//! the outer shell to deserialize real `.client` files.
+//! Ports Java `generator/key/algorithm/*` and `generator/key/*` including the
+//! stateful refresh wrappers.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use rand::Rng;
 use rand_regex::Regex as RandRegex;
@@ -13,6 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::client::error::ClientError;
 use crate::client::event::RequestEvent;
 use crate::client::utils::Casing;
+use crate::torrent::InfoHash;
+
+const TORRENT_PERSISTENT_TTL: Duration = Duration::from_hours(2);
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 
 /// Algorithm used to generate a raw key string before `keyCase` is applied.
 pub trait KeyAlgorithm {
@@ -31,7 +37,49 @@ fn string_from_ascii_regex_bytes(bytes: Vec<u8>) -> Result<String, ClientError> 
     String::from_utf8(bytes).map_err(|e| ClientError::NonUtf8Output(e.to_string()))
 }
 
-const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+fn lock_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn default_shared_state<T: Default>() -> Arc<Mutex<T>> {
+    Arc::new(Mutex::new(T::default()))
+}
+
+fn generate_key(algorithm: &KeyAlgorithmDef, key_case: Casing) -> Result<String, ClientError> {
+    Ok(key_case.to_case(&algorithm.generate()?))
+}
+
+#[derive(Debug, Clone, Default)]
+struct TimedKeyState {
+    key: Option<String>,
+    last_generation: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct AccessAwareKey {
+    key: String,
+    last_access: Instant,
+}
+
+impl AccessAwareKey {
+    fn new(key: String) -> Self {
+        Self {
+            key,
+            last_access: Instant::now(),
+        }
+    }
+
+    fn get_key(&mut self) -> &str {
+        self.last_access = Instant::now();
+        &self.key
+    }
+
+    fn should_evict(&self, now: Instant) -> bool {
+        now.duration_since(self.last_access) >= TORRENT_PERSISTENT_TTL
+    }
+}
 
 /// `type = "HASH"`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,15 +254,17 @@ impl KeyAlgorithmDef {
     }
 }
 
-/// Parseable shell for Java `KeyGenerator` refresh wrappers.
-#[allow(non_camel_case_types)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Runtime generator matching Java `KeyGenerator` refresh wrappers.
+#[allow(non_camel_case_types, private_interfaces)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "refreshOn")]
 pub enum KeyGenerator {
     NEVER {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
+        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
+        state: Arc<Mutex<TimedKeyState>>,
     },
     ALWAYS {
         algorithm: KeyAlgorithmDef,
@@ -227,6 +277,8 @@ pub enum KeyGenerator {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
+        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
+        state: Arc<Mutex<TimedKeyState>>,
     },
     TIMED_OR_AFTER_STARTED_ANNOUNCE {
         #[serde(rename = "refreshEvery")]
@@ -234,18 +286,179 @@ pub enum KeyGenerator {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
+        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
+        state: Arc<Mutex<TimedKeyState>>,
     },
     TORRENT_VOLATILE {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
+        #[serde(skip, default = "default_shared_state::<HashMap<InfoHash, String>>")]
+        state: Arc<Mutex<HashMap<InfoHash, String>>>,
     },
     TORRENT_PERSISTENT {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
+        #[serde(
+            skip,
+            default = "default_shared_state::<HashMap<InfoHash, AccessAwareKey>>"
+        )]
+        state: Arc<Mutex<HashMap<InfoHash, AccessAwareKey>>>,
     },
 }
+
+impl Clone for KeyGenerator {
+    fn clone(&self) -> Self {
+        match self {
+            KeyGenerator::NEVER {
+                algorithm,
+                key_case,
+                ..
+            } => Self::NEVER {
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+                state: default_shared_state(),
+            },
+            KeyGenerator::ALWAYS {
+                algorithm,
+                key_case,
+            } => Self::ALWAYS {
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+            },
+            KeyGenerator::TIMED {
+                refresh_every,
+                algorithm,
+                key_case,
+                ..
+            } => Self::TIMED {
+                refresh_every: *refresh_every,
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+                state: default_shared_state(),
+            },
+            KeyGenerator::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+                refresh_every,
+                algorithm,
+                key_case,
+                ..
+            } => Self::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+                refresh_every: *refresh_every,
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+                state: default_shared_state(),
+            },
+            KeyGenerator::TORRENT_VOLATILE {
+                algorithm,
+                key_case,
+                ..
+            } => Self::TORRENT_VOLATILE {
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+                state: default_shared_state(),
+            },
+            KeyGenerator::TORRENT_PERSISTENT {
+                algorithm,
+                key_case,
+                ..
+            } => Self::TORRENT_PERSISTENT {
+                algorithm: algorithm.clone(),
+                key_case: *key_case,
+                state: default_shared_state(),
+            },
+        }
+    }
+}
+
+#[allow(clippy::match_same_arms)]
+impl PartialEq for KeyGenerator {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::NEVER {
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                    ..
+                },
+                Self::NEVER {
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                    ..
+                },
+            )
+            | (
+                Self::ALWAYS {
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                },
+                Self::ALWAYS {
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                },
+            )
+            | (
+                Self::TORRENT_VOLATILE {
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                    ..
+                },
+                Self::TORRENT_VOLATILE {
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                    ..
+                },
+            )
+            | (
+                Self::TORRENT_PERSISTENT {
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                    ..
+                },
+                Self::TORRENT_PERSISTENT {
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                    ..
+                },
+            ) => left_algorithm == right_algorithm && left_key_case == right_key_case,
+            (
+                Self::TIMED {
+                    refresh_every: left_refresh_every,
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                    ..
+                },
+                Self::TIMED {
+                    refresh_every: right_refresh_every,
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                    ..
+                },
+            )
+            | (
+                Self::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+                    refresh_every: left_refresh_every,
+                    algorithm: left_algorithm,
+                    key_case: left_key_case,
+                    ..
+                },
+                Self::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+                    refresh_every: right_refresh_every,
+                    algorithm: right_algorithm,
+                    key_case: right_key_case,
+                    ..
+                },
+            ) => {
+                left_refresh_every == right_refresh_every
+                    && left_algorithm == right_algorithm
+                    && left_key_case == right_key_case
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for KeyGenerator {}
 
 impl KeyGenerator {
     pub fn validate(&self) -> Result<(), ClientError> {
@@ -298,19 +511,98 @@ impl KeyGenerator {
         }
     }
 
-    pub fn get(&self, _event: RequestEvent) -> Result<String, ClientError> {
+    pub fn get(&self, info_hash: &InfoHash, event: RequestEvent) -> Result<String, ClientError> {
+        self.validate()?;
         match self {
+            KeyGenerator::NEVER {
+                algorithm,
+                key_case,
+                state,
+            } => {
+                let mut state = lock_state(state);
+                if state.key.is_none() {
+                    state.key = Some(generate_key(algorithm, *key_case)?);
+                    state.last_generation = Some(Instant::now());
+                }
+                Ok(state.key.clone().expect("key initialized"))
+            }
             KeyGenerator::ALWAYS {
                 algorithm,
                 key_case,
-            } => Ok(key_case.to_case(&algorithm.generate()?)),
-            KeyGenerator::NEVER { .. }
-            | KeyGenerator::TIMED { .. }
-            | KeyGenerator::TIMED_OR_AFTER_STARTED_ANNOUNCE { .. }
-            | KeyGenerator::TORRENT_VOLATILE { .. }
-            | KeyGenerator::TORRENT_PERSISTENT { .. } => Err(ClientError::Integrity(
-                "key refresh semantics beyond ALWAYS are deferred to S5".to_owned(),
-            )),
+            } => generate_key(algorithm, *key_case),
+            KeyGenerator::TIMED {
+                refresh_every,
+                algorithm,
+                key_case,
+                state,
+            } => {
+                let mut state = lock_state(state);
+                let should_regenerate = state.last_generation.is_none_or(|last_generation| {
+                    last_generation.elapsed() >= Duration::from_secs(*refresh_every as u64)
+                });
+                if should_regenerate {
+                    state.last_generation = Some(Instant::now());
+                    state.key = Some(generate_key(algorithm, *key_case)?);
+                }
+                Ok(state.key.clone().expect("key initialized"))
+            }
+            KeyGenerator::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+                refresh_every,
+                algorithm,
+                key_case,
+                state,
+            } => {
+                let mut state = lock_state(state);
+                let should_regenerate = state.last_generation.is_none_or(|last_generation| {
+                    last_generation.elapsed() >= Duration::from_secs(*refresh_every as u64)
+                });
+                if should_regenerate {
+                    state.last_generation = Some(Instant::now());
+                    state.key = Some(generate_key(algorithm, *key_case)?);
+                }
+
+                let key = state.key.clone().expect("key initialized");
+                if event == RequestEvent::Started {
+                    state.key = Some(generate_key(algorithm, *key_case)?);
+                }
+                Ok(key)
+            }
+            KeyGenerator::TORRENT_VOLATILE {
+                algorithm,
+                key_case,
+                state,
+            } => {
+                let mut state = lock_state(state);
+                if !state.contains_key(info_hash) {
+                    state.insert(info_hash.clone(), generate_key(algorithm, *key_case)?);
+                }
+                let key = state.get(info_hash).cloned().expect("key initialized");
+                if event == RequestEvent::Stopped {
+                    state.remove(info_hash);
+                }
+                Ok(key)
+            }
+            KeyGenerator::TORRENT_PERSISTENT {
+                algorithm,
+                key_case,
+                state,
+            } => {
+                let mut state = lock_state(state);
+                if !state.contains_key(info_hash) {
+                    state.insert(
+                        info_hash.clone(),
+                        AccessAwareKey::new(generate_key(algorithm, *key_case)?),
+                    );
+                }
+                let key = state
+                    .get_mut(info_hash)
+                    .expect("key initialized")
+                    .get_key()
+                    .to_owned();
+                let now = Instant::now();
+                state.retain(|_, entry| !entry.should_evict(now));
+                Ok(key)
+            }
         }
     }
 }
@@ -321,6 +613,16 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use regex::Regex;
+
+    fn info_hash(fill: u8) -> InfoHash {
+        InfoHash::from_bytes([fill; 20])
+    }
+
+    fn regex_algorithm() -> KeyAlgorithmDef {
+        KeyAlgorithmDef::REGEX(RegexKeyAlgorithm {
+            pattern: "[A-Z0-9]{8}".to_owned(),
+        })
+    }
 
     #[test]
     fn hash_algorithm_snapshot_with_seed_and_upper_hex() {
@@ -394,7 +696,7 @@ mod tests {
             algorithm: KeyAlgorithmDef::HASH(HashKeyAlgorithm { length: 4 }),
             key_case: Casing::Lower,
         };
-        let got = generator.get(RequestEvent::None).unwrap();
+        let got = generator.get(&info_hash(1), RequestEvent::None).unwrap();
         assert_eq!(got.len(), 4);
         assert!(got.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_eq!(got, got.to_ascii_lowercase());
@@ -424,5 +726,113 @@ mod tests {
         let generator: KeyGenerator = serde_json::from_str(json).unwrap();
         assert_eq!(generator.key_case(), Casing::Upper);
         assert!(matches!(generator, KeyGenerator::TORRENT_PERSISTENT { .. }));
+    }
+
+    #[test]
+    fn never_reuses_same_key_forever() {
+        let generator = KeyGenerator::NEVER {
+            algorithm: regex_algorithm(),
+            key_case: Casing::Upper,
+            state: default_shared_state(),
+        };
+        let first = generator.get(&info_hash(1), RequestEvent::None).unwrap();
+        let second = generator.get(&info_hash(2), RequestEvent::Stopped).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn timed_reuses_until_refresh_every_elapsed() {
+        let generator = KeyGenerator::TIMED {
+            refresh_every: 60,
+            algorithm: regex_algorithm(),
+            key_case: Casing::Upper,
+            state: default_shared_state(),
+        };
+        let first = generator.get(&info_hash(1), RequestEvent::None).unwrap();
+        let second = generator
+            .get(&info_hash(1), RequestEvent::Completed)
+            .unwrap();
+        assert_eq!(first, second);
+
+        let KeyGenerator::TIMED { state, .. } = &generator else {
+            panic!("expected timed generator");
+        };
+        lock_state(state).last_generation =
+            Some(Instant::now().checked_sub(Duration::from_secs(61)).unwrap());
+
+        let third = generator.get(&info_hash(1), RequestEvent::None).unwrap();
+        assert_ne!(first, third);
+    }
+
+    #[test]
+    fn timed_or_after_started_announce_rotates_after_returning_started_key() {
+        let generator = KeyGenerator::TIMED_OR_AFTER_STARTED_ANNOUNCE {
+            refresh_every: 60,
+            algorithm: regex_algorithm(),
+            key_case: Casing::Upper,
+            state: default_shared_state(),
+        };
+        let started = generator.get(&info_hash(1), RequestEvent::Started).unwrap();
+        let after_started = generator.get(&info_hash(1), RequestEvent::None).unwrap();
+        assert_ne!(started, after_started);
+        let same_after_started = generator
+            .get(&info_hash(1), RequestEvent::Completed)
+            .unwrap();
+        assert_eq!(after_started, same_after_started);
+    }
+
+    #[test]
+    fn torrent_volatile_reuses_per_torrent_and_evicts_on_stopped() {
+        let generator = KeyGenerator::TORRENT_VOLATILE {
+            algorithm: regex_algorithm(),
+            key_case: Casing::Upper,
+            state: default_shared_state(),
+        };
+        let torrent_a = info_hash(1);
+        let torrent_b = info_hash(2);
+
+        let first_a = generator.get(&torrent_a, RequestEvent::None).unwrap();
+        let second_a = generator.get(&torrent_a, RequestEvent::Completed).unwrap();
+        let first_b = generator.get(&torrent_b, RequestEvent::None).unwrap();
+        let stopped_a = generator.get(&torrent_a, RequestEvent::Stopped).unwrap();
+        let after_stop_a = generator.get(&torrent_a, RequestEvent::None).unwrap();
+
+        assert_eq!(first_a, second_a);
+        assert_eq!(first_a, stopped_a);
+        assert_ne!(first_a, first_b);
+        assert_ne!(first_a, after_stop_a);
+    }
+
+    #[test]
+    fn torrent_persistent_reuses_per_torrent_and_sweeps_on_each_get() {
+        let generator = KeyGenerator::TORRENT_PERSISTENT {
+            algorithm: regex_algorithm(),
+            key_case: Casing::Upper,
+            state: default_shared_state(),
+        };
+        let stale_torrent = info_hash(1);
+        let hot_torrent = info_hash(2);
+
+        let stale_value = generator.get(&stale_torrent, RequestEvent::None).unwrap();
+        let hot_value = generator.get(&hot_torrent, RequestEvent::None).unwrap();
+
+        let KeyGenerator::TORRENT_PERSISTENT { state, .. } = &generator else {
+            panic!("expected persistent generator");
+        };
+        lock_state(state)
+            .get_mut(&stale_torrent)
+            .unwrap()
+            .last_access = Instant::now()
+            .checked_sub(TORRENT_PERSISTENT_TTL + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(
+            generator.get(&hot_torrent, RequestEvent::None).unwrap(),
+            hot_value
+        );
+        assert_eq!(lock_state(state).len(), 1);
+
+        let stale_after_evict = generator.get(&stale_torrent, RequestEvent::None).unwrap();
+        assert_ne!(stale_value, stale_after_evict);
     }
 }
