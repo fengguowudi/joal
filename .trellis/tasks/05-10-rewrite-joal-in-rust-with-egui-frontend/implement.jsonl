@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Java 版 backend 指南总索引；Rust 实现要沿用 directory-structure / error-handling / logging / quality / persistence 五个维度的设计思路"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "core/ vs web/ 分层、feature-based packaging、event/payload mirror 模式；Rust workspace 的 crates 组织要复用这些约束（core 不依赖 UI 层）"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Java checked/unchecked 分类映射到 Rust 的 thiserror(库) + anyhow(应用) 模型；保持错误边界和异常语义"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志级别矩阵与参数化格式要迁移到 tracing crate，保证日志行为与 Java 版可对照"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "DI / final / 测试框架策略翻译为 Rust 对等（显式依赖传参、默认不可变、cargo test + mockall + assert）；覆盖率与最小测试要求不降"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "no-db 文件系统持久化契约：config.json + clients/*.client + torrents/*.torrent 布局与 archive 规则必须完全保留，用户迁移零成本"}
+{"file": "重构准则.md", "reason": "用户指定的重构手册（Fowler 中译要点），所有改动须遵循"小步前进 + 保证可观察行为不变"原则；禁止把功能变更与结构调整混在同一个提交"}

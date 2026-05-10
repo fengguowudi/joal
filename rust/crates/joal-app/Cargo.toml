@@ -1,0 +1,29 @@
+[package]
+name = "joal-app"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JOAL desktop app — CLI + egui front-end wrapping joal-core."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "joal-desktop"
+path = "src/main.rs"
+
+[dependencies]
+joal-core = { path = "../joal-core" }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+anyhow = { workspace = true }
+
+# UI dependencies are added in MVP-2 (egui). Keep feature gated for now so
+# MVP-1 can build as a headless CLI without pulling in eframe.

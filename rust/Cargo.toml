@@ -1,0 +1,106 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/joal-core",
+    "crates/joal-app",
+    "crates/joal-testing",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anthonyraymond/joal"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# We do explicit `< 0` / upper-bound checks before these casts; trust the code.
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+# Sentinel values (e.g. upload_ratio_target = -1.0) compare by exact equality
+# on purpose — the file format encodes them as exact literals.
+float_cmp = "allow"
+# Too many false positives for product/spec nouns (BitTorrent, JOAL, ...).
+doc_markdown = "allow"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "fs",
+    "time",
+    "signal",
+    "io-util",
+] }
+# http
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "gzip",
+    "http2",
+] }
+# bencode / hash / url
+serde_bencode = "0.2"
+serde_bytes = "0.11"
+sha1 = "0.10"
+percent-encoding = "2"
+
+# serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# regex-based random generator (replaces Java generex 1.0.2)
+rand = "0.8"
+rand_regex = "0.17"
+regex-syntax = { version = "0.8", default-features = false, features = [
+    "unicode",
+] }
+
+# filesystem watcher
+notify = "7"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# errors
+thiserror = "1"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# UI (MVP-2)
+eframe = { version = "0.34", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] }
+egui = "0.34"
+egui_extras = "0.34"
+egui_plot = "0.34"
+
+# testing
+tempfile = "3"
+mockall = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

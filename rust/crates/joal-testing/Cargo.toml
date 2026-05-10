@@ -1,0 +1,18 @@
+[package]
+name = "joal-testing"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test fixtures and Java-compatibility golden samples for joal-core."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+joal-core = { path = "../joal-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

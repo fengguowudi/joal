@@ -1,0 +1,37 @@
+[package]
+name = "joal-core"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JOAL core engine — client emulation, bandwidth dispatch, tracker announcer (headless, no UI)."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bencode = { workspace = true }
+serde_bytes = { workspace = true }
+
+sha1 = { workspace = true }
+percent-encoding = { workspace = true }
+
+rand = { workspace = true }
+rand_regex = { workspace = true }
+regex-syntax = { workspace = true }
+
+notify = { workspace = true }
+
+tracing = { workspace = true }
+
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
