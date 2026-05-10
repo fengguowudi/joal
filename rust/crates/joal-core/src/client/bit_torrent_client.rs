@@ -24,11 +24,12 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::bandwidth::TorrentSeedStats;
 use crate::client::config::{BitTorrentClientConfig, HttpHeader};
 use crate::client::error::ClientError;
 use crate::client::event::RequestEvent;
 use crate::client::generator::{KeyGenerator, NumwantProvider, PeerIdGenerator, UrlEncoder};
-use crate::client::runtime::{ConnectionHandler, TorrentSeedStats};
+use crate::client::runtime::ConnectionHandler;
 use crate::torrent::InfoHash;
 
 /// Fallback `{java}` header value used when no JVM is around.
@@ -144,9 +145,9 @@ impl BitTorrentClient {
             .replace_all(&self.query, regex::NoExpand(&info_hash_encoded))
             .into_owned();
 
-        q = replace_literal(&q, &UPLOADED_PTRN, &stats.uploaded.to_string());
-        q = replace_literal(&q, &DOWNLOADED_PTRN, &stats.downloaded.to_string());
-        q = replace_literal(&q, &LEFT_PTRN, &stats.left.to_string());
+        q = replace_literal(&q, &UPLOADED_PTRN, &stats.uploaded().to_string());
+        q = replace_literal(&q, &DOWNLOADED_PTRN, &stats.downloaded().to_string());
+        q = replace_literal(&q, &LEFT_PTRN, &stats.left().to_string());
         q = replace_literal(&q, &PORT_PTRN, &connection.port().to_string());
         q = replace_literal(&q, &NUMWANT_PTRN, &self.numwant(event).to_string());
 

@@ -23,5 +23,5 @@ pub use generator::{
     RegexPeerIdAlgorithm, UrlEncoder,
 };
 pub use provider::BitTorrentClientProvider;
-pub use runtime::{ConnectionHandler, TorrentSeedStats};
+pub use runtime::ConnectionHandler;
 pub use utils::Casing;

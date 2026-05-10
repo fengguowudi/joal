@@ -1,45 +1,18 @@
-//! Minimal placeholder for S7/S9; full behavior comes later.
+//! Runtime helpers used by the emulated client.
 //!
-//! S6 needs a concrete shape for the two values that feed into
-//! [`BitTorrentClient::create_request_query`](super::BitTorrentClient::create_request_query):
-//!
-//! - [`TorrentSeedStats`] is the running upload/download/left counter that the
-//!   bandwidth dispatcher will fill in S7. Java counterpart:
-//!   `org.araymond.joal.core.bandwith.TorrentSeedStats`.
-//! - [`ConnectionHandler`] is the `(port, ip_address)` pair that the announcer
-//!   will own in S8/S9. Java counterpart:
-//!   `org.araymond.joal.core.ttorrent.client.ConnectionHandler`.
-//!
-//! Both types here are kept intentionally tiny — they expose the exact surface
-//! `create_request_query` reads and nothing more. The seed-manager and
-//! bandwidth modules will extend them (or wrap them) when they come online.
+//! S7 moves [`TorrentSeedStats`][crate::bandwidth::TorrentSeedStats] into its
+//! Java-native home (`core::bandwidth`). What remains here is the local
+//! seeding endpoint that
+//! [`BitTorrentClient::create_request_query`][super::BitTorrentClient::create_request_query]
+//! reads at announce time — the `(port, ip_address)` pair that the announcer
+//! will own in S8/S9 (Java counterpart:
+//! `org.araymond.joal.core.ttorrent.client.ConnectionHandler`).
 
 use std::net::IpAddr;
 
-/// Running torrent statistics for the announce query.
-///
-/// Minimal placeholder for S7/S9; full behavior comes later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TorrentSeedStats {
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
-}
-
-impl TorrentSeedStats {
-    #[must_use]
-    pub const fn new(uploaded: u64, downloaded: u64, left: u64) -> Self {
-        Self {
-            uploaded,
-            downloaded,
-            left,
-        }
-    }
-}
-
 /// Local seeding endpoint (port + bind address).
 ///
-/// Minimal placeholder for S7/S9; full behavior comes later.
+/// Minimal placeholder for S8/S9; full behaviour comes later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionHandler {
     port: u16,

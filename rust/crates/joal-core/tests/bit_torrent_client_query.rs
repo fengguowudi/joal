@@ -1,7 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use joal_core::bandwidth::TorrentSeedStats;
 use joal_core::client::{
-    BitTorrentClient, BitTorrentClientConfig, ConnectionHandler, RequestEvent, TorrentSeedStats,
+    BitTorrentClient, BitTorrentClientConfig, ConnectionHandler, RequestEvent,
 };
 use joal_core::torrent::InfoHash;
 use joal_testing::sample_client_file;
