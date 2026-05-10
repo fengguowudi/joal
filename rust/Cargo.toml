@@ -72,6 +72,9 @@ regex-syntax = { version = "0.8", default-features = false, features = [
 # filesystem watcher
 notify = "7"
 
+# system locale (User-Agent header `{locale}` placeholder)
+sys-locale = "0.3"
+
 # logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

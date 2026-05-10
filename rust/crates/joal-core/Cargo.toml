@@ -29,6 +29,8 @@ regex-syntax = { workspace = true }
 
 notify = { workspace = true }
 
+sys-locale = { workspace = true }
+
 tracing = { workspace = true }
 
 thiserror = { workspace = true }
