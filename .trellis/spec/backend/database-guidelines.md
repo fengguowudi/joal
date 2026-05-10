@@ -56,8 +56,8 @@ See `core/config/AppConfiguration.java:13` for the canonical example.
 ## Scenario: Rust `.client` file compatibility
 
 ### 1. Scope / Trigger
-- Trigger: `rust/crates/joal-core/src/client/**` now parses JOAL `clients/*.client` files directly, so the file-format contract is no longer "Java-only knowledge".
-- Why code-spec depth is mandatory: `.client` is a persisted cross-module contract shared by config loading, announce query construction, and golden tests.
+- Trigger: `rust/crates/joal-core/src/client/**` now both parses JOAL `clients/*.client` files and executes the runtime refresh semantics encoded in those files.
+- Why code-spec depth is mandatory: `.client` is a persisted cross-module contract shared by config loading, announce query construction, and tracker-visible peer-id/key behavior.
 
 ### 2. Signatures
 - `BitTorrentClientConfig::try_from(&str) -> Result<BitTorrentClientConfig, ClientError>`
@@ -65,6 +65,8 @@ See `core/config/AppConfiguration.java:13` for the canonical example.
 - `UrlEncoder::encode(&self, &str) -> Result<String, ClientError>`
 - `UrlEncoder::encode_bytes(&self, &[u8]) -> Result<String, ClientError>`
 - `NumwantProvider::get(&self, RequestEvent) -> i32`
+- `PeerIdGenerator::get(&self, &InfoHash, RequestEvent) -> Result<String, ClientError>`
+- `KeyGenerator::get(&self, &InfoHash, RequestEvent) -> Result<String, ClientError>`
 
 ### 3. Contracts
 - File location: `<confDirRoot>/clients/*.client`
@@ -82,7 +84,16 @@ See `core/config/AppConfiguration.java:13` for the canonical example.
 - `peerIdGenerator` / `keyGenerator` contract:
   - `algorithm` is serde-tagged by `type`
   - refresh policy comes from `refreshOn`
-  - S4/S5 boundary rule: before a refresh policy is implemented correctly, parsing/validation must fail fast instead of silently emulating the wrong behavior
+  - runtime identity methods are torrent-aware: the cache key is `InfoHash`, not only `RequestEvent`
+  - `NEVER`: generate once per generator instance, then reuse forever
+  - `TIMED`: reuse current value until `refreshEvery` seconds have elapsed, then rotate
+  - `TORRENT_VOLATILE`: cache per `InfoHash`; on `RequestEvent::Stopped`, return the current value first and then evict that torrent entry
+  - `TORRENT_PERSISTENT`: cache per `InfoHash`; evict entries after 120 minutes of inactivity
+  - peer-id `TORRENT_PERSISTENT` mirrors Java's lazy sweep cadence: run eviction every 30 `get(...)` calls, not on every call
+  - key `TORRENT_PERSISTENT` mirrors Java's eager sweep cadence: run eviction on every `get(...)`
+  - key `TIMED_OR_AFTER_STARTED_ANNOUNCE`: return the current key for `STARTED`, then rotate so the next call sees the new key
+  - peer-id generation must still enforce the 20-byte invariant before any value becomes tracker-visible
+  - historical S4/S5 boundary rule still applies for future staged work: before a refresh policy is implemented correctly, parsing/validation must fail fast instead of silently emulating the wrong behavior
 - `UrlEncoder` contract:
   - Tracker-visible bytes are encoded byte-by-byte as `%HH`
   - ASCII bytes matching `encodingExclusionPattern` pass through unchanged
@@ -97,44 +108,51 @@ See `core/config/AppConfiguration.java:13` for the canonical example.
 | `query` contains `{key}` but `keyGenerator` is absent | integrity error |
 | `urlEncoder.encodingExclusionPattern` is invalid regex | regex validation error during config load |
 | peer-id/key algorithm payload is invalid (`length <= 0`, bad regex, invalid pool/checksum config) | validation error during config load |
-| refresh policy is present but not implemented for the current stage | explicit fail-fast error, never silently downgrade to `ALWAYS` |
+| `TIMED` / `TIMED_OR_AFTER_STARTED_ANNOUNCE` has `refreshEvery < 1` | integrity error during config load |
+| peer-id algorithm produces anything other than 20 bytes | integrity error before returning a tracker-visible value |
 | `requestHeaders` fields are present but empty strings | allow; Java only enforces non-null, not non-empty |
+| a future staged port adds a refresh policy shell before the runtime semantics | fail fast; never silently coerce that policy into `ALWAYS` |
 
 ### 5. Good / Base / Bad Cases
-- Good: `resources/clients/qbittorrent-4.5.0.client` parses unchanged and retains Java field names/casing.
+- Good: `resources/clients/qbittorrent-4.5.0.client` parses unchanged, retains Java field names/casing, and yields `KeyGenerator::TORRENT_PERSISTENT`.
+- Good: `TIMED_OR_AFTER_STARTED_ANNOUNCE` returns the current key for `STARTED`, then rotates so the next announce uses a new key.
 - Base: a minimal `.client` file with `peerIdGenerator`, `urlEncoder`, one request header, and a `query` without `{key}` parses without a `keyGenerator`.
+- Base: `TORRENT_VOLATILE` returns the same value for repeated announces of the same torrent until a `STOPPED` announce, while a different `InfoHash` gets its own cached value.
 - Bad: a `.client` file that uses `{key}` in `query` but omits `keyGenerator` must fail validation.
-- Bad: treating `NEVER`, `TIMED`, `TORRENT_PERSISTENT`, or `TORRENT_VOLATILE` as if they were already equivalent to `ALWAYS`.
+- Bad: treating `NEVER`, `TIMED`, `TORRENT_PERSISTENT`, or `TORRENT_VOLATILE` as if they were equivalent to `ALWAYS`.
+- Bad: evicting `TORRENT_VOLATILE` entries before returning the `STOPPED` value, or rotating the `STARTED` key before returning it.
 
 ### 6. Tests Required
 - Golden test: parse `resources/clients/*.client` and assert all repository fixtures deserialize successfully.
-- Focused golden test: assert `qbittorrent-4.5.0.client` field-by-field, including serde rename/casing.
+- Focused golden test: assert `qbittorrent-4.5.0.client` field-by-field, including serde rename/casing and the `TORRENT_PERSISTENT` key policy.
 - Unit test: exhaustive `0x00..=0xFF` coverage for `UrlEncoder` with a real exclusion pattern.
 - Unit test: invalid regex and invalid algorithm payloads fail during config parsing/validation.
-- Unit test: unsupported pre-S5 refresh policies fail fast rather than generating incorrect peer-id/key values.
+- Unit test: `NEVER` reuses the same peer-id/key across multiple torrents and events.
+- Unit test: `TIMED` reuses until the threshold, then rotates after the threshold.
+- Unit test: `TORRENT_VOLATILE` caches per `InfoHash` and evicts only after returning the `STOPPED` value.
+- Unit test: peer-id `TORRENT_PERSISTENT` evicts stale entries only on the 30th `get(...)` sweep boundary.
+- Unit test: key `TORRENT_PERSISTENT` evicts stale entries on the next `get(...)`.
+- Unit test: `TIMED_OR_AFTER_STARTED_ANNOUNCE` returns the pre-rotation key on `STARTED` and the rotated key on the following call.
 
 ### 7. Wrong vs Correct
 #### Wrong
 ```rust
-// Pretends S5 refresh semantics already exist.
-match refresh_on {
-    RefreshPolicy::Always => algorithm.generate(),
-    RefreshPolicy::Never
-    | RefreshPolicy::Timed(_)
-    | RefreshPolicy::TorrentPersistent
-    | RefreshPolicy::TorrentVolatile => algorithm.generate(),
+if event == RequestEvent::Started {
+    state.key = Some(generate_key(algorithm, *key_case)?);
 }
+state.key.clone().unwrap()
 ```
 
 #### Correct
 ```rust
-match refresh_on {
-    RefreshPolicy::Always => algorithm.generate(),
-    other => Err(ClientError::UnsupportedRefreshPolicy(other)),
+let key = state.key.clone().expect("key initialized");
+if event == RequestEvent::Started {
+    state.key = Some(generate_key(algorithm, *key_case)?);
 }
+Ok(key)
 ```
 
-This preserves correctness: partial implementations must stop loudly instead of producing tracker-visible behavior that looks valid but diverges from Java.
+The Java contract is observable at the tracker boundary: `STARTED` must use the current key, and only the following announce may see the rotated one.
 
 ---
 
