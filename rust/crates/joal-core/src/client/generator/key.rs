@@ -61,6 +61,12 @@ struct TimedKeyState {
 struct AccessAwareKey {
     key: String,
     last_access: Instant,
+    // `#[cfg(test)]`-only override: lets tests mark an entry as "already
+    // expired" without needing `Instant::now().checked_sub(TTL)` — which
+    // underflows on fresh Windows boots where the monotonic clock is
+    // anchored to system uptime. Production code never touches this field.
+    #[cfg(test)]
+    force_stale: bool,
 }
 
 impl AccessAwareKey {
@@ -68,16 +74,34 @@ impl AccessAwareKey {
         Self {
             key,
             last_access: Instant::now(),
+            #[cfg(test)]
+            force_stale: false,
         }
     }
 
     fn get_key(&mut self) -> &str {
         self.last_access = Instant::now();
+        #[cfg(test)]
+        {
+            // Any read resets the test-only stale flag so that a torrent
+            // that gets re-touched after being force-expired behaves like a
+            // freshly-accessed entry (mirrors production `last_access` reset).
+            self.force_stale = false;
+        }
         &self.key
     }
 
     fn should_evict(&self, now: Instant) -> bool {
+        #[cfg(test)]
+        if self.force_stale {
+            return true;
+        }
         now.duration_since(self.last_access) >= TORRENT_PERSISTENT_TTL
+    }
+
+    #[cfg(test)]
+    fn mark_stale_for_test(&mut self) {
+        self.force_stale = true;
     }
 }
 
@@ -822,9 +846,7 @@ mod tests {
         lock_state(state)
             .get_mut(&stale_torrent)
             .unwrap()
-            .last_access = Instant::now()
-            .checked_sub(TORRENT_PERSISTENT_TTL + Duration::from_secs(1))
-            .unwrap();
+            .mark_stale_for_test();
 
         assert_eq!(
             generator.get(&hot_torrent, RequestEvent::None).unwrap(),
