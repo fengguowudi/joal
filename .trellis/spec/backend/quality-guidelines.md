@@ -187,3 +187,61 @@ public void shouldPublishConfigHasBeenLoadedEventOnConfigLoad() throws FileNotFo
 - Hamcrest / JUnit assertions — AssertJ only.
 - Adding a new exception without `serialVersionUID` (see `error-handling.md`).
 - Large `@SpringBootTest` when a plain unit test would do — `@SpringBootTest` is reserved for the `*WebAppTest.java` files that genuinely exercise the web stack.
+
+---
+
+## Rust port — testing conventions
+
+The following rules apply to the Rust workspace under `rust/crates/` (same spec, different language). They supplement, not replace, the Java conventions above.
+
+### Gotcha: `Instant::now().checked_sub(ttl)` is platform-unsafe in tests
+
+**Symptom**: a test panics with `called Option::unwrap() on a None value` only on freshly booted Windows hosts (or any machine whose process uptime is less than the TTL being subtracted). Same test passes reliably on Linux / macOS / long-uptime boxes.
+
+**Cause**: `std::time::Instant` is monotonic and anchored to an unspecified epoch — on Windows it is the boot-time performance counter. Subtracting a `Duration` that is larger than the current anchor value saturates to `None` via `checked_sub`. Tests that simulate an "expired" entry by writing
+
+```rust
+entry.last_access = Instant::now().checked_sub(TTL + Duration::from_secs(1)).unwrap();
+```
+
+are therefore non-deterministic: they depend on how long the host has been up.
+
+**Fix (convention)**: expose a `#[cfg(test)]`-gated override on the state type and short-circuit the staleness check in test builds only. The field itself does not exist in release builds, so production semantics stay byte-identical.
+
+```rust
+// rust/crates/joal-core/src/client/generator/peer_id.rs
+struct AccessAwarePeerId {
+    value: PeerId,
+    last_access: Instant,
+    #[cfg(test)]
+    force_stale: bool, // only visible to tests — zero cost in release
+}
+
+impl AccessAwarePeerId {
+    fn should_evict(&self, now: Instant) -> bool {
+        #[cfg(test)]
+        if self.force_stale {
+            return true;
+        }
+        now.duration_since(self.last_access) > TORRENT_PERSISTENT_TTL
+    }
+
+    #[cfg(test)]
+    fn mark_stale_for_test(&mut self) {
+        self.force_stale = true;
+    }
+}
+```
+
+**Why this over alternatives**:
+- Injecting a clock (passing `Instant` in everywhere) bloats every call site for a test-only concern.
+- `unwrap_or_else(|| Instant::now())` in the test masks the panic but silently turns a "stale entry" test into a "fresh entry" test — the assertion afterwards would pass vacuously.
+- A `#[cfg(test)]` helper keeps production paths untouched and makes the test intent explicit.
+
+**Related**: don't use `Instant::now().checked_sub(...)` anywhere inside `#[test]` code. Grep the diff for it before merging.
+
+### Convention: no `.unwrap()` / `.expect()` outside `#[cfg(test)]`
+
+Applies to every Rust crate in this workspace. The CLI (`joal-app`) uses `anyhow::Context` to bubble errors; library crates (`joal-core`) use `thiserror` — see `error-handling.md`. Tests may freely `unwrap()` on fixtures.
+
+Grep check before committing: `rg '\.unwrap\(\)' rust/crates/ --glob '!tests/**' --glob '!**/tests.rs'` should only hit `#[cfg(test)] mod tests` blocks.

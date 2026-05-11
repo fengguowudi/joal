@@ -141,3 +141,51 @@ Web-tier integration tests end in `*WebAppTest.java` (see `web/config/EndpointOb
 - Renaming `core/bandwith` to `bandwidth` — it is intentionally stable across the codebase; a rename touches every import and every historical commit reference.
 - Putting a `@RestController` anywhere — this project exposes no REST surface; everything user-facing goes through STOMP `@MessageMapping` in `web/resources/WebSocketController.java`.
 - Adding persistent storage (JPA, JDBC, Spring Data). Configuration is `config.json`, torrent files are the filesystem — see `database-guidelines.md`.
+
+---
+
+## Rust port — `joal-app` boot / shutdown contract
+
+The Rust workspace under `rust/` mirrors the Java layout one layer down: `joal-core` replaces `core/`, `joal-app` replaces the `JackOfAllTradesApplication` + `web/` entry pair. Same rule: `joal-core` has zero UI / CLI concerns, `joal-app` depends on `joal-core`, never the reverse.
+
+### Boot sequence (must mirror Java `SeedManager`)
+
+`joal-app::main::boot()` composes the engine in this exact order. The order is load-bearing — each step depends on the previous one's output, and the reverse order is what `shutdown()` uses.
+
+1. `config::load(&joal_conf).await` → `(AppConfiguration, JoalFolders)`. File I/O + validation happen here — fail fast.
+2. `BitTorrentClientProvider::new(folders.clients_dir.clone()).load(app_config.client())` → active `BitTorrentClient`.
+3. `BandwidthDispatcher::new(BANDWIDTH_TICK_PERIOD, RandomSpeedProvider::new(&app_config))` + `.start()` (spawns its tokio tick task).
+4. `TorrentFileProvider::new(&folders)` + `.start()` (spawns watcher + initial-scan task).
+5. `BroadcastSink::default()` — event bus. Wire subscribers (event logger, 30 s status printer) **before** the orchestrator starts so no startup events are missed.
+6. `ConnectionHandler::with_ephemeral_port()` — bind an OS-assigned port; fall back to `ConnectionHandler::with_port_only(51413)` (BitTorrent well-known port) only on bind failure.
+7. `AnnounceDataAccessor` + `AnnouncerFactory::new(data_accessor, reqwest::Client, app_config.upload_ratio_target)`. The `reqwest::Client` carries a 30 s timeout.
+8. `ClientOrchestrator::new(...)` + `.start()`.
+9. `tokio::signal::ctrl_c().await` — the only blocking wait in `main`.
+
+`JoalFolders` exposes its directory paths as **public fields** (`clients_dir`, `torrents_dir`, `torrents_archive_dir`, `conf_root`) — use them directly, do not wrap them in accessor methods just to match Java getter ergonomics.
+
+### Shutdown sequence (reverse of boot)
+
+Ctrl+C triggers:
+1. `orchestrator.stop()` — drains `RequestEvent::Regular` entries into STOP announces, drops pending `RequestEvent::Started` entries (they have no tracker session yet). See `database-guidelines.md` scenario "Rust announcer + orchestrator" for why.
+2. `torrent_provider.stop()` — aborts the watcher task.
+3. `join_handle.abort()` for the event logger + status printer tokio tasks.
+
+### Contract: `BandwidthDispatcher` has no explicit `stop()` in the boot chain
+
+The dispatcher is shared into `AnnounceDataAccessor` via `Arc`, so ownership is multi-rooted by the time shutdown runs. `main` intentionally does **not** call `dispatcher.stop()`: the dispatcher's `Drop` impl already aborts its tick task when the last `Arc` is dropped. If you refactor the dispatcher's lifecycle you must preserve one of:
+- the `Drop`-aborts-task invariant, **or**
+- a single-owner handle that `main` can call `stop()` on explicitly.
+
+Breaking both leaks the tick task past shutdown. Tests that spin up and tear down the dispatcher many times (e.g. `tests/orchestrator_end_to_end.rs`) will surface the leak as hung tokio tasks.
+
+### Event logger must be exhaustive
+
+The event-logger task matches on `EngineEvent` without a `_` arm. Adding a new variant to the enum is therefore a compile break at the `joal-app` boundary, which is intentional — it forces the CLI (and the future egui UI) to decide what to do with every new observable event.
+
+### Anti-patterns (Rust)
+
+- Calling `dispatcher.stop()` *or* `dispatcher.start()` outside `joal-app::main::boot` / `shutdown`. Lifecycle is owned by the CLI, not by `joal-core`.
+- Spawning tokio tasks from `joal-core` constructors without returning their `JoinHandle` — shutdown needs a handle to abort cleanly.
+- Importing `eframe` / `egui` / `tracing-subscriber` from `joal-core`. UI wiring and logger init live in `joal-app`.
+- Subscribing to `BroadcastSink` after `orchestrator.start()` — the first few events (e.g. `TorrentFileAdded` during initial scan) will be missed.
