@@ -160,10 +160,10 @@ impl BitTorrentClient {
         q = replace_literal(&q, &PEER_ID_PTRN, &peer_id);
 
         match connection.ip_address() {
-            IpAddr::V4(v4) if q.contains("{ip}") => {
+            Some(IpAddr::V4(v4)) if q.contains("{ip}") => {
                 q = replace_literal(&q, &IP_PTRN, &v4.to_string());
             }
-            IpAddr::V6(v6) if q.contains("{ipv6}") => {
+            Some(IpAddr::V6(v6)) if q.contains("{ipv6}") => {
                 let encoded = self.url_encoder.encode(&v6.to_string())?;
                 q = replace_literal(&q, &IPV6_PTRN, &encoded);
             }

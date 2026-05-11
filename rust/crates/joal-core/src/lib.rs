@@ -24,5 +24,7 @@ pub mod bandwidth;
 pub mod bencode;
 pub mod client;
 pub mod config;
+pub mod events;
 pub mod seed_manager;
 pub mod torrent;
+pub mod ttorrent_client;

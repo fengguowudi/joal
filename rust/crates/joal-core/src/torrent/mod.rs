@@ -1,10 +1,11 @@
-//! Torrent domain: `InfoHash`, `MockedTorrent`.
+//! Torrent domain: `InfoHash`, `MockedTorrent`, filesystem watcher.
 //!
-//! Mirrors Java `org.araymond.joal.core.torrent.torrent.*` — the minimum a
-//! fake seeder needs: parse a `.torrent` file, compute its `info_hash`
-//! (SHA-1 of the raw `info` dict bytes, BEP-3), extract the announce URLs
-//! and the fields required to validate that `pieces × piece_length` matches
-//! the advertised size.
+//! Mirrors Java `org.araymond.joal.core.torrent.*` — the minimum a fake
+//! seeder needs: parse a `.torrent` file, compute its `info_hash` (SHA-1 of
+//! the raw `info` dict bytes, BEP-3), extract the announce URLs and the
+//! fields required to validate that `pieces × piece_length` matches the
+//! advertised size. The [`watcher`] submodule adds the async [`notify`]-based
+//! hot-reload behaviour ported from Java `TorrentFileProvider`.
 //!
 //! # Equality semantics
 //!
@@ -19,6 +20,10 @@ use sha1::{Digest, Sha1};
 use tokio::io;
 
 use crate::bencode::{self, BencodeError, Value};
+
+pub mod watcher;
+
+pub use watcher::{NoMoreTorrentsError, TorrentFileChangeAware, TorrentFileProvider};
 
 /// The 20-byte SHA-1 of a torrent's `info` dictionary (BEP-3 `info_hash`).
 #[derive(Clone, PartialEq, Eq, Hash)]

@@ -156,6 +156,108 @@ The Java contract is observable at the tracker boundary: `STARTED` must use the 
 
 ---
 
+## Scenario: Rust announcer + orchestrator
+
+### 1. Scope / Trigger
+- Trigger: `rust/crates/joal-core/src/announcer/**` (tracker HTTP client + stateful per-torrent `Announcer`) and `rust/crates/joal-core/src/ttorrent_client/**` (DelayQueue-driven orchestrator) are now the authoritative announce pipeline for the Rust port.
+- Why code-spec depth is mandatory: the announce URL is tracker-visible and the orchestrator sequences persistence side-effects (archive) with bandwidth bookkeeping (register/unregister). A silent regression in either breaks byte-level compatibility with `ttorrent-core 1.5` or corrupts the upload/weight accounting used by the bandwidth dispatcher.
+
+### 2. Signatures
+- `SuccessAnnounceResponse::parse_with_uri(bytes: &[u8], uri: &Uri) -> Result<SuccessAnnounceResponse, AnnouncerError>`
+- `TrackerClient::announce(&self, query: String, headers: HeaderMap) -> Result<SuccessAnnounceResponse, AnnouncerError>`
+- `Announcer::announce(&self, event: RequestEvent) -> Result<SuccessAnnounceResponse, AnnouncerError>`
+- `DelayQueue::<T: InfoHashed>::add_or_replace(&self, item: T, delay: Duration)`
+- `DelayQueue::drain_all(&self) -> Vec<T>`
+- `ClientOrchestrator::stop(&self)` — drains the queue and emits only valid terminal announces.
+- `TorrentFileProvider::move_to_archive_folder(&self, info_hash: &InfoHash)` — filesystem move, never delete.
+
+### 3. Contracts
+- **Announce URL separator**: the final URL is `base_uri + sep + query`, where `sep = '?'` if `base_uri` contains no `?`, otherwise `'&'` (Java `TrackerClient.makeCallAndGetResponseAsByteBuffer`; Rust `announcer/tracker.rs`). Trackers that embed pre-existing query parameters in the announce URL must see those parameters preserved.
+- **Self-exclusion clamp on seeders**: `seeders = max(0, complete - 1)` on every `SuccessAnnounceResponse::parse_with_uri`. The `-1` subtracts the client itself from the seeder count the tracker reports (Java `SuccessAnnounceResponse`; Rust `announcer/response.rs`). Downstream weight calculation in `bandwidth/weight.rs` assumes this clamp has already been applied.
+- **`failure reason` is a typed error, not a success**: a BEP-3 response of the form `d14:failure reason...e` must promote to `AnnouncerError::TrackerReported` even when the HTTP status is 200. It is the only case where a 200 OK body is not a successful announce (Rust `announcer/response.rs` + `announcer/error.rs`).
+- **Consecutive-failure threshold**: `Announcer::announce` increments `consecutive_fails` on every error path and escalates to `AnnouncerError::TooManyFailures` when `consecutive_fails >= 5` (Java `Announcer.announce` constant; Rust `announcer/state.rs`). The constant is fixed, not configurable.
+- **Stop-phase drain rule**: when `ClientOrchestrator::stop()` drains the `DelayQueue`, entries whose `event == RequestEvent::Started` are **dropped**, not converted to `Stop`. Rationale: a torrent with a pending STARTED has never announced, so the tracker has no session to tear down. Sending a STOP for an unknown info-hash is either silently ignored (good tracker) or a protocol violation (strict tracker). (Java `Client.stop()` stream filter; Rust `ttorrent_client/client.rs::stop`.)
+- **Archive, never delete** (extends the existing persistence contract to the Rust watcher): `TorrentFileProvider::move_to_archive_folder` is the only sanctioned disposal path. Failed / removed / malformed / ratio-met torrents all move to `<confDirRoot>/torrents/archived/`. Watcher-side parse errors on newly-created `.torrent` files also archive instead of propagating, matching Java `TorrentFileProvider.onFileCreate` (`core/torrent/watcher/TorrentFileProvider.java:109`).
+- **Response handler chain order (fixed)**: `AnnounceEventPublisher → AnnounceReEnqueuer → BandwidthDispatcherNotifier → ClientNotifier`. This order is load-bearing:
+  - `AnnounceReEnqueuer` schedules the next tick before any side-effects run, so a handler panicking downstream still leaves a valid queue entry.
+  - `BandwidthDispatcherNotifier` must run **before** `ClientNotifier`. If `ClientNotifier` archives a torrent first, the bandwidth dispatcher is left holding a dangling `InfoHash` weight entry until the next weight recompute, skewing per-torrent allocation.
+- **DelayQueue dedup key = `InfoHash`**: `add_or_replace(item, delay)` removes any existing entry with the same info-hash before inserting the new one. Prevents double-announce under rapid event churn (e.g., add → remove → add of the same `.torrent` file); the newer event supersedes the older one rather than queueing both.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected result |
+|-----------|-----------------|
+| Tracker returns HTTP 200 with a body containing `failure reason` | `AnnouncerError::TrackerReported`, counts as a failure |
+| Tracker returns HTTP 200 but bencode is missing `interval` / `complete` / `incomplete` | `AnnouncerError::IncompleteResponse`, counts as a failure |
+| Tracker reports `complete = 0` | `seeders = 0` (clamp), not a negative number |
+| Transport error (connect refused / timeout) on the current URI | rotate to next URI via `TrackerClientUriProvider` before failing the call |
+| All URIs exhausted in one pass | `AnnouncerError::NoMoreUri`, counts as a failure |
+| 5th failure in a row (any failure mode) | `AnnouncerError::TooManyFailures`, orchestrator must archive + pull next torrent |
+| `ClientOrchestrator::stop()` finds a pending `RequestEvent::Started` in the queue | drop, do not convert to `Stop` |
+| `.torrent` file parse fails in the watcher (new file added) | move the offending file to `torrents/archived/`, do not propagate the error |
+| `DelayQueue::add_or_replace` called with an info-hash already present | replace in place, do not queue both |
+
+### 5. Good / Base / Bad Cases
+- Good: announce URL `http://t.example/announce?passkey=abc` with template query `info_hash=...&event=started` yields `http://t.example/announce?passkey=abc&info_hash=...&event=started` — pre-existing `?passkey` survives.
+- Good: tracker returns `d8:completei10e10:incompletei5e8:intervali1800ee` → `SuccessAnnounceResponse { seeders: 9, leechers: 5, interval: 1800 }`. The `9` is the clamp.
+- Good: orchestrator processes a STARTED announce, receives `interval: 1800`, re-enqueues the same info-hash as a regular event 1800 s later. A concurrent `.torrent` file deletion supersedes that regular entry with a STOP at delay 1 s.
+- Base: a fresh `ClientOrchestrator::start` loads three `.torrent` files, schedules three STARTED announces at delay 0. The DelayQueue holds exactly three distinct info-hashes.
+- Base: a stop-phase drain with one STARTED pending and one regular pending emits exactly one STOP (for the regular entry) and drops the STARTED.
+- Bad: promoting a tracker `failure reason` response into a `SuccessAnnounceResponse` because the HTTP layer returned 200. The caller will record a phantom `interval` and re-schedule a doomed announce.
+- Bad: unregistering a torrent from the bandwidth dispatcher **after** the client archives it. The weight calculator can observe a zero-file/non-zero-weight moment between the two side-effects.
+- Bad: calling `Files::remove_file` on a `.torrent` instead of `move_to_archive_folder` — users lose the recovery trail.
+
+### 6. Tests Required
+- Unit: `SuccessAnnounceResponse::parse_with_uri` on `d8:completei1e10:incompletei0e8:intervali1800ee` asserts `seeders == 0` (clamp proof).
+- Unit: `parse_with_uri` on `d14:failure reason12:access denyede` returns `AnnouncerError::TrackerReported`.
+- Unit: `TrackerClient::announce` with a URI provider of `[refused_tcp_port, wiremock_ok]` rotates to the second URI and returns success — covered by `tests/announcer_http.rs::rotates_after_transport_failure`.
+- Unit: `Announcer::announce` fails five times in a row and on the fifth returns `TooManyFailures`.
+- Unit: `DelayQueue::add_or_replace` with duplicate info-hash and shorter delay demotes the earlier entry; `drain_all` returns only the later one.
+- Integration: `tests/orchestrator_end_to_end.rs` — start orchestrator with a `.torrent` file, wiremock tracker returns `interval: 30`; assert the first request carries `event=started`; call `stop()`; assert a `event=stopped` is sent before the orchestrator exits.
+- Integration: dropping a malformed `.torrent` file into the watched directory archives the file instead of killing the watcher task.
+
+### 7. Wrong vs Correct
+#### Wrong
+```rust
+// Bandwidth unregister runs after archive in the handler chain.
+pub fn handler_chain() -> AnnounceResponseHandlerChain {
+    chain.register(AnnounceEventPublisher::new(bus.clone()));
+    chain.register(AnnounceReEnqueuer::new(queue.clone()));
+    chain.register(ClientNotifier::new(orchestrator.clone()));           // archives torrent
+    chain.register(BandwidthDispatcherNotifier::new(dispatcher.clone())); // unregisters weight
+    chain
+}
+
+// Stop drain converts STARTED → STOP.
+for request in queue.drain_all() {
+    announcer_executor.execute(request.to_stop());
+}
+```
+
+#### Correct
+```rust
+// BandwidthDispatcherNotifier must see the event before ClientNotifier can archive the torrent.
+pub fn handler_chain() -> AnnounceResponseHandlerChain {
+    chain.register(AnnounceEventPublisher::new(bus.clone()));
+    chain.register(AnnounceReEnqueuer::new(queue.clone()));
+    chain.register(BandwidthDispatcherNotifier::new(dispatcher.clone()));
+    chain.register(ClientNotifier::new(orchestrator.clone()));
+    chain
+}
+
+// Stop drain drops pending STARTED entries; only already-announced torrents get a STOP.
+for request in queue.drain_all() {
+    if request.event() == RequestEvent::Started {
+        continue; // tracker has no session for this info-hash yet
+    }
+    announcer_executor.execute(request.to_stop());
+}
+```
+
+The handler order is a silent correctness invariant: reordering compiles and passes any test that doesn't assert on the observable "bandwidth weight freed before torrent archived" ordering. Lock it down with a direct chain-composition test in `ClientBuilder::build`.
+
+---
+
 ## Writing torrent files to disk
 
 Only one path writes torrent files: `SeedManager.saveTorrentToDisk` (`core/SeedManager.java:171`). It:
