@@ -19,6 +19,7 @@ joal-core = { path = "../joal-core" }
 
 tokio = { workspace = true }
 clap = { workspace = true }
+reqwest = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

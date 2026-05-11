@@ -835,6 +835,7 @@ dependencies = [
  "anyhow",
  "clap",
  "joal-core",
+ "reqwest",
  "tokio",
  "tracing",
  "tracing-subscriber",
