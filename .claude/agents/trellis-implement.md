@@ -72,6 +72,15 @@ Read the task's prd.md and info.md:
 - Follow existing code patterns
 - Only do what's required, no over-engineering
 
+### 3.5 Test-Driven (when applicable)
+
+When implementing new modules or fixing bugs, prefer the TDD approach from `/tdd`:
+- Write ONE failing test first (vertical slice, not horizontal)
+- Write minimal code to pass
+- Refactor only after green
+- Tests verify behavior through public interfaces, not implementation details
+- Mock only at system boundaries (external APIs, filesystem, network)
+
 ### 4. Verify
 
 Run project's lint and typecheck commands to verify changes.

@@ -63,6 +63,15 @@ Read relevant specs in `.trellis/spec/` to check code:
 - Are there missing types
 - Are there potential bugs
 
+### Step 2.5: Architecture Quick-Check
+
+Apply the depth heuristic from `/improve-codebase-architecture`:
+- Are new modules deep (small interface, rich implementation) or shallow (pass-through)?
+- Does the deletion test pass? (If you delete the module, does complexity vanish or redistribute?)
+- Are there unnecessary adapters for single-implementation seams?
+
+Flag shallow modules but don't block on them — report as recommendations.
+
 ### Step 3: Self-Fix
 
 After finding issues:
