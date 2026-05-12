@@ -337,39 +337,9 @@ impl TorrentFileProvider {
             return;
         };
         let target = self.archive_dir.join(name);
-        if let Err(e) = tokio::fs::rename(file, &target).await {
-            // Java's `Files.move(..., REPLACE_EXISTING)` overwrites. On
-            // Windows, `tokio::fs::rename` fails if the target exists, so we
-            // delete-then-rename as a fallback. A raw `copy + remove` would
-            // also work; `remove + rename` is cheaper.
-            if target.exists() {
-                if let Err(del_err) = tokio::fs::remove_file(&target).await {
-                    error!(
-                        source = %file.display(),
-                        target = %target.display(),
-                        error = %del_err,
-                        "failed to archive file: could not remove existing target"
-                    );
-                    return;
-                }
-                if let Err(move_err) = tokio::fs::rename(file, &target).await {
-                    error!(
-                        source = %file.display(),
-                        target = %target.display(),
-                        error = %move_err,
-                        "failed to archive file after removing existing target"
-                    );
-                    return;
-                }
-            } else {
-                error!(
-                    source = %file.display(),
-                    target = %target.display(),
-                    error = %e,
-                    "failed to archive file, remains in folder"
-                );
-                return;
-            }
+        if rename_with_overwrite(file, &target).await.is_err() {
+            // All error paths are already logged by `rename_with_overwrite`.
+            return;
         }
         info!(source = %file.display(), "successfully moved file to archive folder");
     }
@@ -444,21 +414,9 @@ impl TorrentFileProvider {
             return;
         };
         let target = self.archive_dir.join(name);
-        if let Err(e) = tokio::fs::rename(file, &target).await {
-            if target.exists() {
-                let _ = tokio::fs::remove_file(&target).await;
-                if let Err(move_err) = tokio::fs::rename(file, &target).await {
-                    error!(
-                        source = %file.display(),
-                        error = %move_err,
-                        "failed to archive malformed file"
-                    );
-                    return;
-                }
-            } else {
-                error!(source = %file.display(), error = %e, "failed to archive malformed file");
-                return;
-            }
+        if rename_with_overwrite(file, &target).await.is_err() {
+            // All error paths are already logged by `rename_with_overwrite`.
+            return;
         }
         info!(source = %file.display(), "archived malformed torrent file");
     }
@@ -470,6 +428,48 @@ fn path_is_torrent_file(path: &Path) -> bool {
 
 fn notify_to_io(err: &notify::Error) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+/// Move `src` to `target`, overwriting if `target` already exists.
+///
+/// Java uses `Files.move(..., REPLACE_EXISTING)`. `tokio::fs::rename` fails
+/// if the target exists on Windows, so we fall back to delete-then-rename.
+/// All error paths are logged; returns `Err` so the caller can skip the
+/// success-log path.
+async fn rename_with_overwrite(src: &Path, target: &Path) -> io::Result<()> {
+    match tokio::fs::rename(src, target).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if !target.exists() {
+                error!(
+                    source = %src.display(),
+                    target = %target.display(),
+                    error = %e,
+                    "failed to archive file, remains in folder"
+                );
+                return Err(e);
+            }
+            if let Err(del_err) = tokio::fs::remove_file(target).await {
+                error!(
+                    source = %src.display(),
+                    target = %target.display(),
+                    error = %del_err,
+                    "failed to archive file: could not remove existing target"
+                );
+                return Err(del_err);
+            }
+            if let Err(move_err) = tokio::fs::rename(src, target).await {
+                error!(
+                    source = %src.display(),
+                    target = %target.display(),
+                    error = %move_err,
+                    "failed to archive file after removing existing target"
+                );
+                return Err(move_err);
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
