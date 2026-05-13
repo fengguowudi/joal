@@ -66,7 +66,7 @@ impl TryFrom<&str> for BitTorrentClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::generator::{HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef};
+    use crate::client::generator::{HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef, KeyConfig};
     use crate::client::utils::Casing;
 
     #[test]
@@ -145,10 +145,12 @@ mod tests {
         assert!(matches!(
             cfg.key_generator,
             Some(KeyGenerator::ALWAYS {
-                algorithm: KeyAlgorithmDef::HASH_NO_LEADING_ZERO(HashNoLeadingZeroKeyAlgorithm {
-                    length: 8
-                }),
-                key_case: Casing::Upper,
+                config: KeyConfig {
+                    algorithm: KeyAlgorithmDef::HASH_NO_LEADING_ZERO(
+                        HashNoLeadingZeroKeyAlgorithm { length: 8 }
+                    ),
+                    key_case: Casing::Upper,
+                },
             })
         ));
     }

@@ -1,28 +1,20 @@
-//! Peer-id generation algorithms and refresh-policy runtime semantics.
+//! Peer-id generation algorithms and config for the refresh-policy system.
 //!
-//! This file ports two Java layers together:
-//! - `generator/peerid/generation/*` — the actual generation algorithms.
-//! - `generator/peerid/*` — the refresh-policy wrapper (`refreshOn`).
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+//! Ports Java `generator/peerid/generation/*` and `generator/peerid/*`.
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::client::error::ClientError;
-use crate::client::event::RequestEvent;
-use crate::torrent::InfoHash;
 
-use super::common::{
-    AccessAwareEntry, TimedState, compile_rand_regex, default_shared_state, lock_state,
-    string_from_ascii_regex_bytes,
-};
+use super::common::{compile_rand_regex, string_from_ascii_regex_bytes};
+use super::refresh_policy::{GenerateValue, RefreshPolicy};
+
+#[cfg(test)]
+use super::common::{default_shared_state, lock_state};
 
 /// Java constant `PeerIdGenerator.PEER_ID_LENGTH`.
 pub const PEER_ID_LENGTH: usize = 20;
-const TORRENT_PERSISTENT_SWEEP_EVERY_GETS: usize = 30;
 
 /// Algorithm used to generate a raw peer-id string.
 pub trait PeerIdAlgorithm {
@@ -39,12 +31,6 @@ fn generate_peer_id(algorithm: &PeerIdAlgorithmDef) -> Result<String, ClientErro
         )));
     }
     Ok(peer_id)
-}
-
-#[derive(Debug, Clone, Default)]
-struct TorrentPersistentPeerIdState {
-    entries: HashMap<InfoHash, AccessAwareEntry>,
-    get_counter: usize,
 }
 
 /// `type = "REGEX"`
@@ -190,309 +176,49 @@ impl PeerIdAlgorithmDef {
     }
 }
 
+/// Config for peer-id generation: algorithm + URL-encoding flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerIdConfig {
+    pub algorithm: PeerIdAlgorithmDef,
+    #[serde(rename = "shouldUrlEncode")]
+    pub should_url_encode: bool,
+}
+
+impl PeerIdConfig {
+    #[must_use]
+    pub fn should_url_encode(&self) -> bool {
+        self.should_url_encode
+    }
+}
+
+impl GenerateValue for PeerIdConfig {
+    fn generate(&self) -> Result<String, ClientError> {
+        generate_peer_id(&self.algorithm)
+    }
+
+    fn validate(&self) -> Result<(), ClientError> {
+        self.algorithm.validate()
+    }
+}
+
 /// Runtime generator matching Java `PeerIdGenerator` refresh wrappers.
-#[allow(non_camel_case_types, private_interfaces)]
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "refreshOn")]
-pub enum PeerIdGenerator {
-    NEVER {
-        algorithm: PeerIdAlgorithmDef,
-        #[serde(rename = "shouldUrlEncode")]
-        should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<TimedState>")]
-        state: Arc<Mutex<TimedState>>,
-    },
-    ALWAYS {
-        algorithm: PeerIdAlgorithmDef,
-        #[serde(rename = "shouldUrlEncode")]
-        should_url_encode: bool,
-    },
-    TIMED {
-        #[serde(rename = "refreshEvery")]
-        refresh_every: i32,
-        algorithm: PeerIdAlgorithmDef,
-        #[serde(rename = "shouldUrlEncode")]
-        should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<TimedState>")]
-        state: Arc<Mutex<TimedState>>,
-    },
-    TORRENT_VOLATILE {
-        algorithm: PeerIdAlgorithmDef,
-        #[serde(rename = "shouldUrlEncode")]
-        should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<HashMap<InfoHash, String>>")]
-        state: Arc<Mutex<HashMap<InfoHash, String>>>,
-    },
-    TORRENT_PERSISTENT {
-        algorithm: PeerIdAlgorithmDef,
-        #[serde(rename = "shouldUrlEncode")]
-        should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<TorrentPersistentPeerIdState>")]
-        state: Arc<Mutex<TorrentPersistentPeerIdState>>,
-    },
-}
-
-impl Clone for PeerIdGenerator {
-    fn clone(&self) -> Self {
-        match self {
-            PeerIdGenerator::NEVER {
-                algorithm,
-                should_url_encode,
-                ..
-            } => Self::NEVER {
-                algorithm: algorithm.clone(),
-                should_url_encode: *should_url_encode,
-                state: default_shared_state(),
-            },
-            PeerIdGenerator::ALWAYS {
-                algorithm,
-                should_url_encode,
-            } => Self::ALWAYS {
-                algorithm: algorithm.clone(),
-                should_url_encode: *should_url_encode,
-            },
-            PeerIdGenerator::TIMED {
-                refresh_every,
-                algorithm,
-                should_url_encode,
-                ..
-            } => Self::TIMED {
-                refresh_every: *refresh_every,
-                algorithm: algorithm.clone(),
-                should_url_encode: *should_url_encode,
-                state: default_shared_state(),
-            },
-            PeerIdGenerator::TORRENT_VOLATILE {
-                algorithm,
-                should_url_encode,
-                ..
-            } => Self::TORRENT_VOLATILE {
-                algorithm: algorithm.clone(),
-                should_url_encode: *should_url_encode,
-                state: default_shared_state(),
-            },
-            PeerIdGenerator::TORRENT_PERSISTENT {
-                algorithm,
-                should_url_encode,
-                ..
-            } => Self::TORRENT_PERSISTENT {
-                algorithm: algorithm.clone(),
-                should_url_encode: *should_url_encode,
-                state: default_shared_state(),
-            },
-        }
-    }
-}
-
-#[allow(clippy::match_same_arms)]
-impl PartialEq for PeerIdGenerator {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::NEVER {
-                    algorithm: left_algorithm,
-                    should_url_encode: left_should_url_encode,
-                    ..
-                },
-                Self::NEVER {
-                    algorithm: right_algorithm,
-                    should_url_encode: right_should_url_encode,
-                    ..
-                },
-            )
-            | (
-                Self::ALWAYS {
-                    algorithm: left_algorithm,
-                    should_url_encode: left_should_url_encode,
-                },
-                Self::ALWAYS {
-                    algorithm: right_algorithm,
-                    should_url_encode: right_should_url_encode,
-                },
-            )
-            | (
-                Self::TORRENT_VOLATILE {
-                    algorithm: left_algorithm,
-                    should_url_encode: left_should_url_encode,
-                    ..
-                },
-                Self::TORRENT_VOLATILE {
-                    algorithm: right_algorithm,
-                    should_url_encode: right_should_url_encode,
-                    ..
-                },
-            )
-            | (
-                Self::TORRENT_PERSISTENT {
-                    algorithm: left_algorithm,
-                    should_url_encode: left_should_url_encode,
-                    ..
-                },
-                Self::TORRENT_PERSISTENT {
-                    algorithm: right_algorithm,
-                    should_url_encode: right_should_url_encode,
-                    ..
-                },
-            ) => {
-                left_algorithm == right_algorithm
-                    && left_should_url_encode == right_should_url_encode
-            }
-            (
-                Self::TIMED {
-                    refresh_every: left_refresh_every,
-                    algorithm: left_algorithm,
-                    should_url_encode: left_should_url_encode,
-                    ..
-                },
-                Self::TIMED {
-                    refresh_every: right_refresh_every,
-                    algorithm: right_algorithm,
-                    should_url_encode: right_should_url_encode,
-                    ..
-                },
-            ) => {
-                left_refresh_every == right_refresh_every
-                    && left_algorithm == right_algorithm
-                    && left_should_url_encode == right_should_url_encode
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for PeerIdGenerator {}
-
-impl PeerIdGenerator {
-    pub fn validate(&self) -> Result<(), ClientError> {
-        self.algorithm().validate()?;
-        if let PeerIdGenerator::TIMED { refresh_every, .. } = self
-            && *refresh_every < 1
-        {
-            return Err(ClientError::Integrity(
-                "refreshEvery must be greater than 0".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn algorithm(&self) -> &PeerIdAlgorithmDef {
-        match self {
-            PeerIdGenerator::NEVER { algorithm, .. }
-            | PeerIdGenerator::ALWAYS { algorithm, .. }
-            | PeerIdGenerator::TIMED { algorithm, .. }
-            | PeerIdGenerator::TORRENT_VOLATILE { algorithm, .. }
-            | PeerIdGenerator::TORRENT_PERSISTENT { algorithm, .. } => algorithm,
-        }
-    }
-
-    #[must_use]
-    pub const fn should_url_encode(&self) -> bool {
-        match self {
-            PeerIdGenerator::NEVER {
-                should_url_encode, ..
-            }
-            | PeerIdGenerator::ALWAYS {
-                should_url_encode, ..
-            }
-            | PeerIdGenerator::TIMED {
-                should_url_encode, ..
-            }
-            | PeerIdGenerator::TORRENT_VOLATILE {
-                should_url_encode, ..
-            }
-            | PeerIdGenerator::TORRENT_PERSISTENT {
-                should_url_encode, ..
-            } => *should_url_encode,
-        }
-    }
-
-    pub fn get(&self, info_hash: &InfoHash, event: RequestEvent) -> Result<String, ClientError> {
-        self.validate()?;
-        match self {
-            PeerIdGenerator::NEVER {
-                algorithm, state, ..
-            } => {
-                let mut state = lock_state(state);
-                if state.value.is_none() {
-                    state.value = Some(generate_peer_id(algorithm)?);
-                    state.last_generation = Some(Instant::now());
-                }
-                Ok(state.value.clone().expect("peer-id initialized"))
-            }
-            PeerIdGenerator::ALWAYS { algorithm, .. } => generate_peer_id(algorithm),
-            PeerIdGenerator::TIMED {
-                refresh_every,
-                algorithm,
-                state,
-                ..
-            } => {
-                let mut state = lock_state(state);
-                let should_regenerate = state.last_generation.is_none_or(|last_generation| {
-                    last_generation.elapsed() >= Duration::from_secs(*refresh_every as u64)
-                });
-                if should_regenerate {
-                    state.last_generation = Some(Instant::now());
-                    state.value = Some(generate_peer_id(algorithm)?);
-                }
-                Ok(state.value.clone().expect("peer-id initialized"))
-            }
-            PeerIdGenerator::TORRENT_VOLATILE {
-                algorithm, state, ..
-            } => {
-                let mut state = lock_state(state);
-                if !state.contains_key(info_hash) {
-                    state.insert(info_hash.clone(), generate_peer_id(algorithm)?);
-                }
-                let peer_id = state.get(info_hash).cloned().expect("peer-id initialized");
-                if event == RequestEvent::Stopped {
-                    state.remove(info_hash);
-                }
-                Ok(peer_id)
-            }
-            PeerIdGenerator::TORRENT_PERSISTENT {
-                algorithm, state, ..
-            } => {
-                let mut state = lock_state(state);
-                if !state.entries.contains_key(info_hash) {
-                    state.entries.insert(
-                        info_hash.clone(),
-                        AccessAwareEntry::new(generate_peer_id(algorithm)?),
-                    );
-                }
-
-                let peer_id = state
-                    .entries
-                    .get_mut(info_hash)
-                    .expect("peer-id initialized")
-                    .get()
-                    .to_owned();
-
-                state.get_counter += 1;
-                if state.get_counter >= TORRENT_PERSISTENT_SWEEP_EVERY_GETS {
-                    state.get_counter = 0;
-                    let now = Instant::now();
-                    state.entries.retain(|_, entry| !entry.should_evict(now));
-                }
-
-                Ok(peer_id)
-            }
-        }
-    }
-}
+pub type PeerIdGenerator = RefreshPolicy<PeerIdConfig>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::event::RequestEvent;
+    use crate::torrent::InfoHash;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use regex::Regex;
+    use std::time::{Duration, Instant};
 
     fn info_hash(fill: u8) -> InfoHash {
         InfoHash::from_bytes([fill; 20])
     }
 
-    fn regex_generator() -> PeerIdAlgorithmDef {
+    fn regex_algorithm() -> PeerIdAlgorithmDef {
         PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm {
             pattern: "[A-Z0-9]{20}".to_owned(),
         })
@@ -501,8 +227,10 @@ mod tests {
     fn timed_generator(refresh_every: i32) -> PeerIdGenerator {
         PeerIdGenerator::TIMED {
             refresh_every,
-            algorithm: regex_generator(),
-            should_url_encode: false,
+            config: PeerIdConfig {
+                algorithm: regex_algorithm(),
+                should_url_encode: false,
+            },
             state: default_shared_state(),
         }
     }
@@ -570,15 +298,17 @@ mod tests {
             "shouldUrlEncode":false
         }"#;
         let generator: PeerIdGenerator = serde_json::from_str(json).unwrap();
-        assert!(!generator.should_url_encode());
+        assert!(!generator.config().should_url_encode());
         assert!(matches!(generator, PeerIdGenerator::NEVER { .. }));
     }
 
     #[test]
     fn never_reuses_same_peer_id_forever() {
         let generator = PeerIdGenerator::NEVER {
-            algorithm: regex_generator(),
-            should_url_encode: false,
+            config: PeerIdConfig {
+                algorithm: regex_algorithm(),
+                should_url_encode: false,
+            },
             state: default_shared_state(),
         };
         let first = generator.get(&info_hash(1), RequestEvent::None).unwrap();
@@ -608,8 +338,10 @@ mod tests {
     #[test]
     fn torrent_volatile_reuses_per_torrent_and_evicts_on_stopped() {
         let generator = PeerIdGenerator::TORRENT_VOLATILE {
-            algorithm: regex_generator(),
-            should_url_encode: false,
+            config: PeerIdConfig {
+                algorithm: regex_algorithm(),
+                should_url_encode: false,
+            },
             state: default_shared_state(),
         };
         let torrent_a = info_hash(1);
@@ -628,10 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn torrent_persistent_reuses_per_torrent_and_sweeps_every_thirty_gets() {
+    fn torrent_persistent_reuses_per_torrent_and_sweeps_on_each_get() {
         let generator = PeerIdGenerator::TORRENT_PERSISTENT {
-            algorithm: regex_generator(),
-            should_url_encode: false,
+            config: PeerIdConfig {
+                algorithm: regex_algorithm(),
+                should_url_encode: false,
+            },
             state: default_shared_state(),
         };
         let stale_torrent = info_hash(1);
@@ -643,29 +377,16 @@ mod tests {
         let PeerIdGenerator::TORRENT_PERSISTENT { state, .. } = &generator else {
             panic!("expected persistent generator");
         };
-        {
-            let mut state = lock_state(state);
-            state
-                .entries
-                .get_mut(&stale_torrent)
-                .unwrap()
-                .mark_stale_for_test();
-            state.get_counter = 0;
-        }
-
-        for _ in 0..29 {
-            assert_eq!(
-                generator.get(&hot_torrent, RequestEvent::None).unwrap(),
-                hot_value
-            );
-        }
-        assert_eq!(lock_state(state).entries.len(), 2);
+        lock_state(state)
+            .get_mut(&stale_torrent)
+            .unwrap()
+            .mark_stale_for_test();
 
         assert_eq!(
             generator.get(&hot_torrent, RequestEvent::None).unwrap(),
             hot_value
         );
-        assert_eq!(lock_state(state).entries.len(), 1);
+        assert_eq!(lock_state(state).len(), 1);
 
         let stale_after_evict = generator.get(&stale_torrent, RequestEvent::None).unwrap();
         assert_ne!(stale_value, stale_after_evict);
@@ -674,10 +395,12 @@ mod tests {
     #[test]
     fn rejects_generated_peer_id_with_wrong_length() {
         let generator = PeerIdGenerator::ALWAYS {
-            algorithm: PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm {
-                pattern: "[A-Z]{19}".to_owned(),
-            }),
-            should_url_encode: false,
+            config: PeerIdConfig {
+                algorithm: PeerIdAlgorithmDef::REGEX(RegexPeerIdAlgorithm {
+                    pattern: "[A-Z]{19}".to_owned(),
+                }),
+                should_url_encode: false,
+            },
         };
 
         let error = generator

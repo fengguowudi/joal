@@ -152,7 +152,7 @@ impl BitTorrentClient {
         q = replace_literal(&q, &NUMWANT_PTRN, &self.numwant(event).to_string());
 
         let peer_id_raw = self.peer_id(info_hash, event)?;
-        let peer_id = if self.peer_id_generator.should_url_encode() {
+        let peer_id = if self.peer_id_generator.config().should_url_encode() {
             self.url_encoder.encode(&peer_id_raw)?
         } else {
             peer_id_raw
