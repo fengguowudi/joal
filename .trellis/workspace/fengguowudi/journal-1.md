@@ -73,3 +73,36 @@ Finished MVP-1 headless Rust engine for JOAL. trellis-check verified all 10 PRD 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Cleanup duplicate helpers in key/peer_id generators
+
+**Date**: 2026-05-13
+**Task**: Cleanup duplicate helpers in key/peer_id generators
+**Branch**: `master`
+
+### Summary
+
+Extracted shared helpers (lock_state, default_shared_state, compile_rand_regex, string_from_ascii_regex_bytes, TORRENT_PERSISTENT_TTL, TimedState, AccessAwareEntry) from key.rs and peer_id.rs into generator/common.rs. Net -71 lines, zero behavior change, 168 tests green.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `660ecde` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
