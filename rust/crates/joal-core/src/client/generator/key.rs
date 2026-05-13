@@ -4,12 +4,10 @@
 //! stateful refresh wrappers.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
-use rand_regex::Regex as RandRegex;
-use regex_syntax::ParserBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::client::error::ClientError;
@@ -17,7 +15,11 @@ use crate::client::event::RequestEvent;
 use crate::client::utils::Casing;
 use crate::torrent::InfoHash;
 
-const TORRENT_PERSISTENT_TTL: Duration = Duration::from_hours(2);
+use super::common::{
+    AccessAwareEntry, TimedState, compile_rand_regex, default_shared_state, lock_state,
+    string_from_ascii_regex_bytes,
+};
+
 const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 
 /// Algorithm used to generate a raw key string before `keyCase` is applied.
@@ -25,84 +27,8 @@ pub trait KeyAlgorithm {
     fn generate(&self) -> Result<String, ClientError>;
 }
 
-fn compile_rand_regex(pattern: &str) -> Result<RandRegex, ClientError> {
-    let hir = ParserBuilder::new()
-        .build()
-        .parse(pattern)
-        .map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))?;
-    RandRegex::with_hir(hir, 100).map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))
-}
-
-fn string_from_ascii_regex_bytes(bytes: Vec<u8>) -> Result<String, ClientError> {
-    String::from_utf8(bytes).map_err(|e| ClientError::NonUtf8Output(e.to_string()))
-}
-
-fn lock_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn default_shared_state<T: Default>() -> Arc<Mutex<T>> {
-    Arc::new(Mutex::new(T::default()))
-}
-
 fn generate_key(algorithm: &KeyAlgorithmDef, key_case: Casing) -> Result<String, ClientError> {
     Ok(key_case.to_case(&algorithm.generate()?))
-}
-
-#[derive(Debug, Clone, Default)]
-struct TimedKeyState {
-    key: Option<String>,
-    last_generation: Option<Instant>,
-}
-
-#[derive(Debug, Clone)]
-struct AccessAwareKey {
-    key: String,
-    last_access: Instant,
-    // `#[cfg(test)]`-only override: lets tests mark an entry as "already
-    // expired" without needing `Instant::now().checked_sub(TTL)` — which
-    // underflows on fresh Windows boots where the monotonic clock is
-    // anchored to system uptime. Production code never touches this field.
-    #[cfg(test)]
-    force_stale: bool,
-}
-
-impl AccessAwareKey {
-    fn new(key: String) -> Self {
-        Self {
-            key,
-            last_access: Instant::now(),
-            #[cfg(test)]
-            force_stale: false,
-        }
-    }
-
-    fn get_key(&mut self) -> &str {
-        self.last_access = Instant::now();
-        #[cfg(test)]
-        {
-            // Any read resets the test-only stale flag so that a torrent
-            // that gets re-touched after being force-expired behaves like a
-            // freshly-accessed entry (mirrors production `last_access` reset).
-            self.force_stale = false;
-        }
-        &self.key
-    }
-
-    fn should_evict(&self, now: Instant) -> bool {
-        #[cfg(test)]
-        if self.force_stale {
-            return true;
-        }
-        now.duration_since(self.last_access) >= TORRENT_PERSISTENT_TTL
-    }
-
-    #[cfg(test)]
-    fn mark_stale_for_test(&mut self) {
-        self.force_stale = true;
-    }
 }
 
 /// `type = "HASH"`
@@ -287,8 +213,8 @@ pub enum KeyGenerator {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
-        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
-        state: Arc<Mutex<TimedKeyState>>,
+        #[serde(skip, default = "default_shared_state::<TimedState>")]
+        state: Arc<Mutex<TimedState>>,
     },
     ALWAYS {
         algorithm: KeyAlgorithmDef,
@@ -301,8 +227,8 @@ pub enum KeyGenerator {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
-        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
-        state: Arc<Mutex<TimedKeyState>>,
+        #[serde(skip, default = "default_shared_state::<TimedState>")]
+        state: Arc<Mutex<TimedState>>,
     },
     TIMED_OR_AFTER_STARTED_ANNOUNCE {
         #[serde(rename = "refreshEvery")]
@@ -310,8 +236,8 @@ pub enum KeyGenerator {
         algorithm: KeyAlgorithmDef,
         #[serde(rename = "keyCase")]
         key_case: Casing,
-        #[serde(skip, default = "default_shared_state::<TimedKeyState>")]
-        state: Arc<Mutex<TimedKeyState>>,
+        #[serde(skip, default = "default_shared_state::<TimedState>")]
+        state: Arc<Mutex<TimedState>>,
     },
     TORRENT_VOLATILE {
         algorithm: KeyAlgorithmDef,
@@ -326,9 +252,9 @@ pub enum KeyGenerator {
         key_case: Casing,
         #[serde(
             skip,
-            default = "default_shared_state::<HashMap<InfoHash, AccessAwareKey>>"
+            default = "default_shared_state::<HashMap<InfoHash, AccessAwareEntry>>"
         )]
-        state: Arc<Mutex<HashMap<InfoHash, AccessAwareKey>>>,
+        state: Arc<Mutex<HashMap<InfoHash, AccessAwareEntry>>>,
     },
 }
 
@@ -544,11 +470,11 @@ impl KeyGenerator {
                 state,
             } => {
                 let mut state = lock_state(state);
-                if state.key.is_none() {
-                    state.key = Some(generate_key(algorithm, *key_case)?);
+                if state.value.is_none() {
+                    state.value = Some(generate_key(algorithm, *key_case)?);
                     state.last_generation = Some(Instant::now());
                 }
-                Ok(state.key.clone().expect("key initialized"))
+                Ok(state.value.clone().expect("key initialized"))
             }
             KeyGenerator::ALWAYS {
                 algorithm,
@@ -566,9 +492,9 @@ impl KeyGenerator {
                 });
                 if should_regenerate {
                     state.last_generation = Some(Instant::now());
-                    state.key = Some(generate_key(algorithm, *key_case)?);
+                    state.value = Some(generate_key(algorithm, *key_case)?);
                 }
-                Ok(state.key.clone().expect("key initialized"))
+                Ok(state.value.clone().expect("key initialized"))
             }
             KeyGenerator::TIMED_OR_AFTER_STARTED_ANNOUNCE {
                 refresh_every,
@@ -582,12 +508,12 @@ impl KeyGenerator {
                 });
                 if should_regenerate {
                     state.last_generation = Some(Instant::now());
-                    state.key = Some(generate_key(algorithm, *key_case)?);
+                    state.value = Some(generate_key(algorithm, *key_case)?);
                 }
 
-                let key = state.key.clone().expect("key initialized");
+                let key = state.value.clone().expect("key initialized");
                 if event == RequestEvent::Started {
-                    state.key = Some(generate_key(algorithm, *key_case)?);
+                    state.value = Some(generate_key(algorithm, *key_case)?);
                 }
                 Ok(key)
             }
@@ -615,13 +541,13 @@ impl KeyGenerator {
                 if !state.contains_key(info_hash) {
                     state.insert(
                         info_hash.clone(),
-                        AccessAwareKey::new(generate_key(algorithm, *key_case)?),
+                        AccessAwareEntry::new(generate_key(algorithm, *key_case)?),
                     );
                 }
                 let key = state
                     .get_mut(info_hash)
                     .expect("key initialized")
-                    .get_key()
+                    .get()
                     .to_owned();
                 let now = Instant::now();
                 state.retain(|_, entry| !entry.should_evict(now));

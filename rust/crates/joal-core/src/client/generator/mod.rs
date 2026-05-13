@@ -3,6 +3,7 @@
 //! Mirrors Java `org.araymond.joal.core.client.emulated.generator` and its
 //! `key`, `peerid`, `numwant` subpackages.
 
+mod common;
 pub mod key;
 pub mod numwant;
 pub mod peer_id;

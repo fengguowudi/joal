@@ -5,49 +5,29 @@
 //! - `generator/peerid/*` — the refresh-policy wrapper (`refreshOn`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
-use rand_regex::Regex as RandRegex;
-use regex_syntax::ParserBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::client::error::ClientError;
 use crate::client::event::RequestEvent;
 use crate::torrent::InfoHash;
 
+use super::common::{
+    AccessAwareEntry, TimedState, compile_rand_regex, default_shared_state, lock_state,
+    string_from_ascii_regex_bytes,
+};
+
 /// Java constant `PeerIdGenerator.PEER_ID_LENGTH`.
 pub const PEER_ID_LENGTH: usize = 20;
-const TORRENT_PERSISTENT_TTL: Duration = Duration::from_hours(2);
 const TORRENT_PERSISTENT_SWEEP_EVERY_GETS: usize = 30;
 
 /// Algorithm used to generate a raw peer-id string.
 pub trait PeerIdAlgorithm {
     /// Generate a peer-id using a deterministic or random source.
     fn generate(&self) -> Result<String, ClientError>;
-}
-
-fn compile_rand_regex(pattern: &str) -> Result<RandRegex, ClientError> {
-    let hir = ParserBuilder::new()
-        .build()
-        .parse(pattern)
-        .map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))?;
-    RandRegex::with_hir(hir, 100).map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))
-}
-
-fn string_from_ascii_regex_bytes(bytes: Vec<u8>) -> Result<String, ClientError> {
-    String::from_utf8(bytes).map_err(|e| ClientError::NonUtf8Output(e.to_string()))
-}
-
-fn lock_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn default_shared_state<T: Default>() -> Arc<Mutex<T>> {
-    Arc::new(Mutex::new(T::default()))
 }
 
 fn generate_peer_id(algorithm: &PeerIdAlgorithmDef) -> Result<String, ClientError> {
@@ -62,62 +42,8 @@ fn generate_peer_id(algorithm: &PeerIdAlgorithmDef) -> Result<String, ClientErro
 }
 
 #[derive(Debug, Clone, Default)]
-struct TimedPeerIdState {
-    peer_id: Option<String>,
-    last_generation: Option<Instant>,
-}
-
-#[derive(Debug, Clone)]
-struct AccessAwarePeerId {
-    peer_id: String,
-    last_access: Instant,
-    // `#[cfg(test)]`-only override: lets tests mark an entry as "already
-    // expired" without needing `Instant::now().checked_sub(TTL)` — which
-    // underflows on fresh Windows boots where the monotonic clock is
-    // anchored to system uptime. Production code never touches this field.
-    #[cfg(test)]
-    force_stale: bool,
-}
-
-impl AccessAwarePeerId {
-    fn new(peer_id: String) -> Self {
-        Self {
-            peer_id,
-            last_access: Instant::now(),
-            #[cfg(test)]
-            force_stale: false,
-        }
-    }
-
-    fn get_peer_id(&mut self) -> &str {
-        self.last_access = Instant::now();
-        #[cfg(test)]
-        {
-            // Any read resets the test-only stale flag so that a torrent
-            // that gets re-touched after being force-expired behaves like a
-            // freshly-accessed entry (mirrors production `last_access` reset).
-            self.force_stale = false;
-        }
-        &self.peer_id
-    }
-
-    fn should_evict(&self, now: Instant) -> bool {
-        #[cfg(test)]
-        if self.force_stale {
-            return true;
-        }
-        now.duration_since(self.last_access) >= TORRENT_PERSISTENT_TTL
-    }
-
-    #[cfg(test)]
-    fn mark_stale_for_test(&mut self) {
-        self.force_stale = true;
-    }
-}
-
-#[derive(Debug, Clone, Default)]
 struct TorrentPersistentPeerIdState {
-    peer_id_per_torrent: HashMap<InfoHash, AccessAwarePeerId>,
+    entries: HashMap<InfoHash, AccessAwareEntry>,
     get_counter: usize,
 }
 
@@ -273,8 +199,8 @@ pub enum PeerIdGenerator {
         algorithm: PeerIdAlgorithmDef,
         #[serde(rename = "shouldUrlEncode")]
         should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<TimedPeerIdState>")]
-        state: Arc<Mutex<TimedPeerIdState>>,
+        #[serde(skip, default = "default_shared_state::<TimedState>")]
+        state: Arc<Mutex<TimedState>>,
     },
     ALWAYS {
         algorithm: PeerIdAlgorithmDef,
@@ -287,8 +213,8 @@ pub enum PeerIdGenerator {
         algorithm: PeerIdAlgorithmDef,
         #[serde(rename = "shouldUrlEncode")]
         should_url_encode: bool,
-        #[serde(skip, default = "default_shared_state::<TimedPeerIdState>")]
-        state: Arc<Mutex<TimedPeerIdState>>,
+        #[serde(skip, default = "default_shared_state::<TimedState>")]
+        state: Arc<Mutex<TimedState>>,
     },
     TORRENT_VOLATILE {
         algorithm: PeerIdAlgorithmDef,
@@ -488,11 +414,11 @@ impl PeerIdGenerator {
                 algorithm, state, ..
             } => {
                 let mut state = lock_state(state);
-                if state.peer_id.is_none() {
-                    state.peer_id = Some(generate_peer_id(algorithm)?);
+                if state.value.is_none() {
+                    state.value = Some(generate_peer_id(algorithm)?);
                     state.last_generation = Some(Instant::now());
                 }
-                Ok(state.peer_id.clone().expect("peer-id initialized"))
+                Ok(state.value.clone().expect("peer-id initialized"))
             }
             PeerIdGenerator::ALWAYS { algorithm, .. } => generate_peer_id(algorithm),
             PeerIdGenerator::TIMED {
@@ -507,9 +433,9 @@ impl PeerIdGenerator {
                 });
                 if should_regenerate {
                     state.last_generation = Some(Instant::now());
-                    state.peer_id = Some(generate_peer_id(algorithm)?);
+                    state.value = Some(generate_peer_id(algorithm)?);
                 }
-                Ok(state.peer_id.clone().expect("peer-id initialized"))
+                Ok(state.value.clone().expect("peer-id initialized"))
             }
             PeerIdGenerator::TORRENT_VOLATILE {
                 algorithm, state, ..
@@ -528,27 +454,25 @@ impl PeerIdGenerator {
                 algorithm, state, ..
             } => {
                 let mut state = lock_state(state);
-                if !state.peer_id_per_torrent.contains_key(info_hash) {
-                    state.peer_id_per_torrent.insert(
+                if !state.entries.contains_key(info_hash) {
+                    state.entries.insert(
                         info_hash.clone(),
-                        AccessAwarePeerId::new(generate_peer_id(algorithm)?),
+                        AccessAwareEntry::new(generate_peer_id(algorithm)?),
                     );
                 }
 
                 let peer_id = state
-                    .peer_id_per_torrent
+                    .entries
                     .get_mut(info_hash)
                     .expect("peer-id initialized")
-                    .get_peer_id()
+                    .get()
                     .to_owned();
 
                 state.get_counter += 1;
                 if state.get_counter >= TORRENT_PERSISTENT_SWEEP_EVERY_GETS {
                     state.get_counter = 0;
                     let now = Instant::now();
-                    state
-                        .peer_id_per_torrent
-                        .retain(|_, entry| !entry.should_evict(now));
+                    state.entries.retain(|_, entry| !entry.should_evict(now));
                 }
 
                 Ok(peer_id)
@@ -722,7 +646,7 @@ mod tests {
         {
             let mut state = lock_state(state);
             state
-                .peer_id_per_torrent
+                .entries
                 .get_mut(&stale_torrent)
                 .unwrap()
                 .mark_stale_for_test();
@@ -735,13 +659,13 @@ mod tests {
                 hot_value
             );
         }
-        assert_eq!(lock_state(state).peer_id_per_torrent.len(), 2);
+        assert_eq!(lock_state(state).entries.len(), 2);
 
         assert_eq!(
             generator.get(&hot_torrent, RequestEvent::None).unwrap(),
             hot_value
         );
-        assert_eq!(lock_state(state).peer_id_per_torrent.len(), 1);
+        assert_eq!(lock_state(state).entries.len(), 1);
 
         let stale_after_evict = generator.get(&stale_torrent, RequestEvent::None).unwrap();
         assert_ne!(stale_value, stale_after_evict);
