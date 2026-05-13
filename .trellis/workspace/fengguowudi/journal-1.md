@@ -127,4 +127,21 @@ Extracted shared helpers (lock_state, default_shared_state, compile_rand_regex, 
 - [OK] App launches, loads config + torrents, engine starts
 
 ### Status
-[IN_PROGRESS] Needs manual UI testing on desktop with display
+[IN_PROGRESS] Core implementation complete, pending manual UI testing
+
+### Follow-up (same session)
+- Fixed Start/Stop to actually control engine (Arc<Mutex<Option<SeedManager>>>)
+- Added AnnounceStarted/Succeeded/Failed events to EngineEvent
+- Config panel now reads config.json on init (no more hardcoded defaults)
+- Full Java UI feature parity audit done — remaining gaps are architectural differences (not bugs)
+
+### Commits
+| Hash | Description |
+|------|-------------|
+| `a181b80` | feat(rust): implement MVP2 egui frontend with full interactive controls |
+| `bd148d4` | fix(rust): implement functional Start/Stop + per-announce events |
+
+### Remaining Work
+- Manual UI testing on Windows desktop with display
+- Stability test (30+ minutes runtime)
+- Minor polish if needed after testing
