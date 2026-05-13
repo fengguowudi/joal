@@ -21,6 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::announcer::{
@@ -30,6 +31,7 @@ use crate::announcer::{
 use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::events::{EngineEvent, EngineEventSink};
+use crate::snapshot::MergerPoke;
 use crate::torrent::InfoHash;
 use crate::ttorrent_client::announcer_executor::AnnounceResponseCallback;
 use crate::ttorrent_client::delay_queue::DelayQueue;
@@ -325,6 +327,56 @@ impl AnnounceResponseHandler for AnnounceEventPublisher {
                 info_hash: announcer.torrent_info_hash().clone(),
                 name: announcer.torrent().name.clone(),
             });
+    }
+}
+
+/// Pokes the [`SeedManager`][crate::seed_manager] merger task whenever an
+/// announcer facade's live fields (`last_known_interval`,
+/// `last_known_seeders` / `leechers`, `consecutive_fails`,
+/// `last_announced_at`) have just moved. The merger rebuilds the whole
+/// snapshot in response — see [`MergerPoke::AnnouncerUpdated`].
+///
+/// Installed as the final handler in the chain so every earlier handler's
+/// bookkeeping (notably [`ClientNotifier`]'s drop decisions) has already
+/// landed before the snapshot is re-merged.
+pub struct MergerPokeNotifier {
+    poke: mpsc::Sender<MergerPoke>,
+}
+
+impl MergerPokeNotifier {
+    #[must_use]
+    pub fn new(poke: mpsc::Sender<MergerPoke>) -> Self {
+        Self { poke }
+    }
+
+    fn fire(&self) {
+        // Full queue is safe to drop: the merger coalesces pokes by reading
+        // the latest facade state on the next wake-up.
+        let _ = self.poke.try_send(MergerPoke::AnnouncerUpdated);
+    }
+}
+
+impl AnnounceResponseHandler for MergerPokeNotifier {
+    fn on_start_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
+        self.fire();
+    }
+    fn on_start_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
+        self.fire();
+    }
+    fn on_regular_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
+        self.fire();
+    }
+    fn on_regular_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
+        self.fire();
+    }
+    fn on_stop_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
+        self.fire();
+    }
+    fn on_stop_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
+        self.fire();
+    }
+    fn on_too_many_failed_in_a_row(&self, _a: &Arc<Announcer>, _e: &TooManyFailuresError) {
+        self.fire();
     }
 }
 

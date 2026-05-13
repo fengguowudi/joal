@@ -34,6 +34,7 @@ sys-locale = { workspace = true }
 tracing = { workspace = true }
 
 thiserror = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 joal-testing = { path = "../joal-testing" }

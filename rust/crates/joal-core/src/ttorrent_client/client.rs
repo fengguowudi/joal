@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, info, warn};
@@ -26,6 +27,7 @@ use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::config::AppConfiguration;
 use crate::events::EngineEventSink;
+use crate::snapshot::MergerPoke;
 use crate::torrent::{
     InfoHash, MockedTorrent, NoMoreTorrentsError, TorrentFileChangeAware, TorrentFileProvider,
 };
@@ -34,7 +36,7 @@ use crate::ttorrent_client::announcer_factory::AnnouncerFactory;
 use crate::ttorrent_client::delay_queue::DelayQueue;
 use crate::ttorrent_client::response_handlers::{
     AnnounceEventPublisher, AnnounceReEnqueuer, AnnounceResponseHandlerChain,
-    BandwidthDispatcherNotifier, ClientNotificationSink, ClientNotifier,
+    BandwidthDispatcherNotifier, ClientNotificationSink, ClientNotifier, MergerPokeNotifier,
 };
 
 /// Period between delay-queue drain attempts. Matches Java's
@@ -73,12 +75,18 @@ impl ClientOrchestrator {
     /// Build an orchestrator from its collaborators. The caller is
     /// responsible for starting the [`BandwidthDispatcher`] and the
     /// [`TorrentFileProvider`] before calling [`ClientOrchestrator::start`].
+    ///
+    /// `merger_poke`, when `Some`, gets a `MergerPoke::AnnouncerUpdated` on
+    /// every announce round-trip (success, fail, too-many-failures, stop).
+    /// [`SeedManager`][crate::seed_manager] passes its merger-task mailbox;
+    /// stand-alone integration tests can pass `None`.
     pub fn new(
         app_config: AppConfiguration,
         torrent_provider: Arc<TorrentFileProvider>,
         bandwidth: Arc<BandwidthDispatcher>,
         announcer_factory: AnnouncerFactory,
         events: &Arc<dyn EngineEventSink>,
+        merger_poke: Option<mpsc::Sender<MergerPoke>>,
     ) -> Arc<Self> {
         let delay_queue = Arc::new(DelayQueue::<AnnounceRequest>::new());
         let shared = Arc::new(SharedState {
@@ -98,11 +106,17 @@ impl ClientOrchestrator {
         chain.append(Arc::new(AnnounceEventPublisher::new(Arc::clone(events))));
         chain.append(Arc::new(AnnounceReEnqueuer::new(Arc::clone(&delay_queue))));
         chain.append(Arc::new(BandwidthDispatcherNotifier::new(bandwidth)));
-        // ClientNotifier comes last: the Java builder appends it *after*
-        // constructing the Client so its callbacks see the fully-wired state.
+        // ClientNotifier comes last among the behaviour-bearing handlers: its
+        // callbacks must see the fully-wired state.
         let notifier_sink: Arc<dyn ClientNotificationSink> =
             Arc::new(ClientNotifierSink::new(Arc::clone(&shared)));
         chain.append(Arc::new(ClientNotifier::new(notifier_sink)));
+        // The merger poke is strictly a snapshot trigger — it runs after every
+        // other handler so the facade fields it triggers on already reflect
+        // the new announce's side-effects.
+        if let Some(poke) = merger_poke {
+            chain.append(Arc::new(MergerPokeNotifier::new(poke)));
+        }
 
         let callback = chain.into_callback();
         let resolver: Arc<dyn AnnouncerResolver> = Arc::new(OrchestratorResolver {

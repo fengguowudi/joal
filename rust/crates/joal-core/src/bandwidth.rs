@@ -39,7 +39,7 @@ pub mod speed;
 pub mod stats;
 pub mod weight;
 
-pub use dispatcher::{BandwidthDispatcher, BandwidthError, SpeedChangedListener};
+pub use dispatcher::{BandwidthDispatcher, BandwidthError};
 pub use peers::Peers;
 pub use random_speed::{RandomSpeedProvider, RandomSpeedSource};
 pub use speed::Speed;

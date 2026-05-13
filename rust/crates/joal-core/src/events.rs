@@ -19,12 +19,10 @@
 //!   payloads avoid holding references to engine-internal state (they use
 //!   owned `InfoHash`, `String`, etc.).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::bandwidth::Speed;
 use crate::torrent::InfoHash;
 
 /// Distinct observable events emitted by the engine.
@@ -63,9 +61,6 @@ pub enum EngineEvent {
     /// An announcer has crossed the 5-consecutive-failure threshold and will
     /// be dropped from the seeding pool.
     TooManyAnnouncesFailedInARow { info_hash: InfoHash, name: String },
-
-    /// The bandwidth dispatcher reshuffled per-torrent upload speeds.
-    SeedingSpeedsHasChanged { speeds: HashMap<InfoHash, Speed> },
 
     /// Config has just been reloaded from disk. Carries the new settings —
     /// consumers can snapshot without touching the config provider.

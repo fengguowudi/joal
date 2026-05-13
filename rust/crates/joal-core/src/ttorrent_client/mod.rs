@@ -22,5 +22,5 @@ pub use client::{ClientError, ClientOrchestrator, ORCHESTRATOR_TICK};
 pub use delay_queue::{DelayQueue, InfoHashAble};
 pub use response_handlers::{
     AnnounceEventPublisher, AnnounceReEnqueuer, AnnounceResponseHandler,
-    AnnounceResponseHandlerChain, BandwidthDispatcherNotifier, ClientNotifier,
+    AnnounceResponseHandlerChain, BandwidthDispatcherNotifier, ClientNotifier, MergerPokeNotifier,
 };

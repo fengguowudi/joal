@@ -122,6 +122,7 @@ async fn orchestrator_starts_and_stops_cleanly() {
         bandwidth,
         factory,
         &events,
+        None,
     );
     orchestrator.start().await.unwrap();
 

@@ -15,6 +15,7 @@
 //! | `bandwidth` | `core.bandwith` — dispatcher + weight calculators |
 //! | `announcer` | `core.ttorrent.client.announcer` — tracker HTTP client |
 //! | `seed_manager` | `core.SeedManager` — top-level orchestrator |
+//! | `snapshot`  | (new) per-frame projection consumed by CLI/egui via `watch` |
 
 #![forbid(unsafe_code)]
 
@@ -26,5 +27,6 @@ pub mod client;
 pub mod config;
 pub mod events;
 pub mod seed_manager;
+pub mod snapshot;
 pub mod torrent;
 pub mod ttorrent_client;

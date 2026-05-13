@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::debug;
@@ -31,22 +32,13 @@ use crate::bandwidth::random_speed::RandomSpeedProvider;
 use crate::bandwidth::speed::Speed;
 use crate::bandwidth::stats::TorrentSeedStats;
 use crate::bandwidth::weight::{PeersAwareWeightCalculator, WeightHolder};
+use crate::snapshot::MergerPoke;
 use crate::torrent::InfoHash;
 
 /// Java `TWENTY_MINS_MS = MINUTES.toMillis(20)` — how often the global
 /// bandwidth budget is re-sampled from [`RandomSpeedProvider`].
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_BANDWIDTH_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
-
-/// Fired after every speed recomputation (torrent register / unregister,
-/// peer-count update, or a 20-minute global refresh).
-///
-/// Port of Java `SpeedChangedListener`. Listeners are invoked synchronously
-/// with the dispatcher's mutex held — do not call back into the dispatcher
-/// from inside the callback.
-pub trait SpeedChangedListener: Send + Sync {
-    fn speeds_has_changed(&self, speeds: &HashMap<InfoHash, Speed>);
-}
 
 /// Lifecycle errors for [`BandwidthDispatcher::start`] / [`BandwidthDispatcher::stop`].
 #[derive(Debug, Error)]
@@ -64,7 +56,7 @@ struct Inner {
     random_speed_provider: RandomSpeedProvider,
     tick_counter: u64,
     ticks_per_refresh: u64,
-    listener: Option<Arc<dyn SpeedChangedListener>>,
+    poke: Option<mpsc::Sender<MergerPoke>>,
 }
 
 impl Inner {
@@ -84,9 +76,11 @@ impl Inner {
             speed.set_bytes_per_second(assigned);
         }
 
-        if let Some(listener) = self.listener.as_ref() {
-            let snapshot = self.speed_map.clone();
-            listener.speeds_has_changed(&snapshot);
+        if let Some(sender) = self.poke.as_ref() {
+            // try_send is intentional: the merger task rebuilds the whole
+            // snapshot on the next poke it reads, so a dropped poke while
+            // the queue is full is safe — it collapses into the next one.
+            let _ = sender.try_send(MergerPoke::SpeedRecomputed);
         }
     }
 
@@ -139,15 +133,21 @@ impl BandwidthDispatcher {
                 random_speed_provider,
                 tick_counter: 0,
                 ticks_per_refresh,
-                listener: None,
+                poke: None,
             })),
             tick_period,
             task: None,
         }
     }
 
-    pub fn set_speed_listener(&self, listener: Arc<dyn SpeedChangedListener>) {
-        self.with_lock(|inner| inner.listener = Some(listener));
+    /// Wire the merger-task mailbox used by [`SeedManager`][crate::seed_manager].
+    ///
+    /// Passing `None` clears the hook (tests + library-only consumers that
+    /// don't run a merger). The dispatcher never blocks on the channel —
+    /// sends are `try_send`; a full queue is silently dropped because the
+    /// next poke will re-merge the latest state anyway.
+    pub fn set_merger_poke(&self, poke: Option<mpsc::Sender<MergerPoke>>) {
+        self.with_lock(|inner| inner.poke = poke);
     }
 
     pub fn register_torrent(&self, info_hash: InfoHash) {
@@ -300,7 +300,6 @@ fn compute_ticks_per_refresh(tick_period: Duration, refresh_interval: Duration) 
 mod tests {
     use super::*;
 
-    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::bandwidth::random_speed::{RandomSpeedProvider, RandomSpeedSource};
@@ -461,24 +460,11 @@ mod tests {
         assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 3_000);
     }
 
-    #[test]
-    fn speed_listener_is_fired_on_each_recompute() {
-        #[derive(Default)]
-        struct Counter {
-            snapshots: StdMutex<Vec<HashMap<InfoHash, Speed>>>,
-        }
-        impl SpeedChangedListener for Counter {
-            fn speeds_has_changed(&self, speeds: &HashMap<InfoHash, Speed>) {
-                self.snapshots
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(speeds.clone());
-            }
-        }
-
+    #[tokio::test]
+    async fn merger_poke_fires_on_each_recompute() {
         let d = dispatcher(1_000_000);
-        let counter = Arc::new(Counter::default());
-        d.set_speed_listener(counter.clone());
+        let (tx, mut rx) = mpsc::channel(16);
+        d.set_merger_poke(Some(tx));
 
         let a = hash(1);
         d.register_torrent(a.clone()); // no recompute on bare register
@@ -486,10 +472,16 @@ mod tests {
         d.refresh_current_bandwidth(); // recompute #2
         d.unregister_torrent(&a); // recompute #3
 
-        let snapshots = counter.snapshots.lock().unwrap();
-        assert_eq!(snapshots.len(), 3);
-        assert_eq!(snapshots[0].len(), 1);
-        assert_eq!(snapshots[2].len(), 0);
+        let mut pokes = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            pokes.push(msg);
+        }
+        assert_eq!(pokes.len(), 3);
+        assert!(
+            pokes
+                .iter()
+                .all(|p| matches!(p, MergerPoke::SpeedRecomputed))
+        );
     }
 
     #[tokio::test]
