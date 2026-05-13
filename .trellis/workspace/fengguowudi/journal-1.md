@@ -106,3 +106,25 @@ Extracted shared helpers (lock_state, default_shared_state, compile_rand_regex, 
 ### Next Steps
 
 - None - task complete
+
+---
+
+## Session: 2026-05-13 — MVP2 egui Frontend
+
+### Task
+05-13-mvp2-egui-frontend-torrent-dashboard-with-real-time-monitoring
+
+### Progress
+- Closed previous task (RefreshPolicy extraction)
+- Implemented eframe 0.34 + egui 0.34 + egui_plot 0.35 integration
+- Architecture: tokio runtime on background thread, eframe on main thread
+- Modules: ui/mod.rs, status_bar.rs, torrent_table.rs, speed_chart.rs, log_panel.rs
+- Resolved egui_plot version conflict (upgraded to 0.35.0)
+
+### Verification
+- [OK] cargo fmt + clippy + test (168 tests, zero warnings)
+- [OK] cargo build --release
+- [OK] App launches, loads config + torrents, engine starts
+
+### Status
+[IN_PROGRESS] Needs manual UI testing on desktop with display
