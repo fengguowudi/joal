@@ -178,6 +178,27 @@ pub async fn load(
     Ok((config, folders))
 }
 
+/// List all `.client` filenames in the `clients/` directory.
+pub async fn list_client_files(folders: &JoalFolders) -> Result<Vec<String>, ConfigError> {
+    let mut entries = tokio::fs::read_dir(&folders.clients_dir)
+        .await
+        .map_err(|source| ConfigError::Io {
+            path: folders.clients_dir.clone(),
+            source,
+        })?;
+    let mut names = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "client")
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// Serialize + write `config.json` atomically (write-to-temp, then rename).
 pub async fn save(folders: &JoalFolders, config: &AppConfiguration) -> Result<(), ConfigError> {
     config.validate()?;

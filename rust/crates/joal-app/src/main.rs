@@ -1,35 +1,46 @@
-//! `joal-desktop` binary entry point.
-//!
-//! MVP-1: CLI-only, no UI. Delegates every piece of wiring to
-//! [`joal_core::seed_manager::SeedManager`], forwards engine events to the
-//! structured logger, reports a periodic status line from the snapshot
-//! channel, and stays alive until the operator presses Ctrl+C. MVP-2
-//! replaces this shell with an eframe window that subscribes to the same
-//! snapshot channel.
+mod ui;
 
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use clap::Parser;
-use joal_core::events::EngineEvent;
+use joal_core::config::{self, AppConfiguration, JoalFolders};
 use joal_core::seed_manager::SeedManager;
-use joal_core::snapshot::{EngineSnapshot, TorrentStatus};
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
-
-/// Cadence for the status printer. Matches the MVP-1 PRD's 30s requirement.
-const STATUS_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+use joal_core::torrent::InfoHash;
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
 /// JOAL desktop — BitTorrent seeding client simulator.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
     /// Path to the `joal-conf` directory (must contain `config.json`,
-    /// `clients/` and `torrents/`). Equivalent to the Java flag
-    /// `--joal-conf=PATH`.
+    /// `clients/` and `torrents/`).
     #[arg(long = "joal-conf", value_name = "DIR")]
-    joal_conf: std::path::PathBuf,
+    joal_conf: PathBuf,
+}
+
+/// Commands sent from the UI thread to the tokio runtime thread.
+#[derive(Debug)]
+pub enum EngineCommand {
+    Stop,
+    Start,
+    SaveConfig(AppConfiguration),
+    DeleteTorrent(InfoHash),
+    AddTorrent(PathBuf),
+    ListClients,
+}
+
+/// Responses sent from the tokio runtime back to the UI.
+#[derive(Debug, Clone)]
+pub enum EngineResponse {
+    Stopped,
+    Started,
+    Error(String),
+    ClientList(Vec<String>),
 }
 
 fn init_tracing() {
@@ -39,146 +50,179 @@ fn init_tracing() {
     fmt().with_env_filter(filter).with_target(true).init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     info!(
         target: "joal_app::boot",
         joal_conf = %args.joal_conf.display(),
-        "joal-desktop starting",
+        "joal-desktop starting (egui mode)",
     );
 
-    let mut seed_manager = SeedManager::start(&args.joal_conf).await?;
+    let rt = Runtime::new()?;
+    let mut seed_manager = rt.block_on(SeedManager::start(&args.joal_conf))?;
 
-    let event_task = spawn_event_logger(seed_manager.subscribe_events());
-    let status_task = spawn_status_printer(seed_manager.snapshot_watch());
+    let snapshot_rx = seed_manager.snapshot_watch();
+    let events_rx = seed_manager.subscribe_events();
+    let folders = seed_manager.folders().clone();
+    let started_at = Instant::now();
 
-    info!(target: "joal_app::boot", "waiting for Ctrl+C to shut down");
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!(target: "joal_app::boot", "Ctrl+C received, shutting down"),
-        Err(e) => warn!(
-            target: "joal_app::boot",
-            error = %e,
-            "failed to install Ctrl+C handler, shutting down anyway",
-        ),
+    // Command channel: UI -> tokio runtime
+    let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(32);
+    // Response channel: tokio runtime -> UI
+    let (resp_tx, resp_rx) = mpsc::channel::<EngineResponse>(32);
+
+    let folders_arc = Arc::new(folders);
+
+    // Spawn the command handler on the tokio runtime
+    let cmd_folders = folders_arc.clone();
+    rt.spawn(command_handler(cmd_rx, resp_tx, cmd_folders));
+
+    let app = ui::JoalApp::new(
+        snapshot_rx,
+        events_rx,
+        started_at,
+        cmd_tx,
+        resp_rx,
+        folders_arc,
+    );
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("JOAL Desktop")
+            .with_inner_size([1024.0, 720.0])
+            .with_min_inner_size([640.0, 480.0]),
+        ..Default::default()
+    };
+
+    if let Err(e) = eframe::run_native(
+        "JOAL Desktop",
+        native_options,
+        Box::new(move |_cc| Ok(Box::new(app))),
+    ) {
+        warn!(target: "joal_app::boot", error = %e, "eframe exited with error");
     }
 
-    seed_manager.stop().await;
-
-    status_task.abort();
-    event_task.abort();
-    let _ = status_task.await;
-    let _ = event_task.await;
-
+    info!(target: "joal_app::boot", "window closed, shutting down engine");
+    rt.block_on(seed_manager.stop());
     info!(target: "joal_app::boot", "joal-desktop stopped cleanly");
     Ok(())
 }
 
-/// Spawn a task that drains the engine event bus into the structured logger.
-fn spawn_event_logger(mut rx: broadcast::Receiver<EngineEvent>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => log_event(&event),
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!(
-                        target: "joal_app::events",
-                        skipped,
-                        "event logger lagged behind; some events were dropped",
-                    );
+async fn command_handler(
+    mut cmd_rx: mpsc::Receiver<EngineCommand>,
+    resp_tx: mpsc::Sender<EngineResponse>,
+    folders: Arc<JoalFolders>,
+) {
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            EngineCommand::ListClients => match config::list_client_files(&folders).await {
+                Ok(clients) => {
+                    let _ = resp_tx.send(EngineResponse::ClientList(clients)).await;
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    debug!(target: "joal_app::events", "event bus closed, logger exiting");
-                    break;
+                Err(e) => {
+                    let _ = resp_tx
+                        .send(EngineResponse::Error(format!(
+                            "Failed to list clients: {e}"
+                        )))
+                        .await;
+                }
+            },
+            EngineCommand::SaveConfig(cfg) => match config::save(&folders, &cfg).await {
+                Ok(()) => {
+                    info!(target: "joal_app::cmd", "config saved");
+                }
+                Err(e) => {
+                    error!(target: "joal_app::cmd", error = %e, "failed to save config");
+                    let _ = resp_tx
+                        .send(EngineResponse::Error(format!("Failed to save config: {e}")))
+                        .await;
+                }
+            },
+            EngineCommand::DeleteTorrent(info_hash) => {
+                let hash_hex = info_hash.to_hex();
+                let moved = move_torrent_to_archive(
+                    &folders.torrents_dir,
+                    &folders.torrents_archive_dir,
+                    &hash_hex,
+                )
+                .await;
+                if !moved {
+                    let _ = resp_tx
+                        .send(EngineResponse::Error(format!(
+                            "Could not find torrent for hash {hash_hex}"
+                        )))
+                        .await;
+                }
+            }
+            EngineCommand::AddTorrent(source_path) => {
+                if let Some(filename) = source_path.file_name() {
+                    let dest = folders.torrents_dir.join(filename);
+                    if let Err(e) = tokio::fs::copy(&source_path, &dest).await {
+                        error!(
+                            target: "joal_app::cmd",
+                            error = %e,
+                            source = %source_path.display(),
+                            "failed to copy torrent file"
+                        );
+                        let _ = resp_tx
+                            .send(EngineResponse::Error(format!("Failed to add torrent: {e}")))
+                            .await;
+                    } else {
+                        info!(
+                            target: "joal_app::cmd",
+                            dest = %dest.display(),
+                            "torrent file copied to torrents/"
+                        );
+                    }
+                }
+            }
+            EngineCommand::Stop => {
+                let _ = resp_tx.send(EngineResponse::Stopped).await;
+            }
+            EngineCommand::Start => {
+                let _ = resp_tx.send(EngineResponse::Started).await;
+            }
+        }
+    }
+}
+
+async fn move_torrent_to_archive(
+    torrents_dir: &std::path::Path,
+    archive_dir: &std::path::Path,
+    hash_hex: &str,
+) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(torrents_dir).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "torrent") {
+            continue;
+        }
+        if let Ok(torrent) = joal_core::torrent::MockedTorrent::from_file(&path).await
+            && torrent.info_hash.to_hex() == hash_hex
+        {
+            let _ = tokio::fs::create_dir_all(archive_dir).await;
+            if let Some(filename) = path.file_name() {
+                let target = archive_dir.join(filename);
+                // Try rename; on Windows may need remove-then-rename
+                if tokio::fs::rename(&path, &target).await.is_ok() {
+                    info!(
+                        target: "joal_app::cmd",
+                        source = %path.display(),
+                        "torrent moved to archive"
+                    );
+                    return true;
+                }
+                let _ = tokio::fs::remove_file(&target).await;
+                if tokio::fs::rename(&path, &target).await.is_ok() {
+                    return true;
                 }
             }
         }
-    })
-}
-
-fn log_event(event: &EngineEvent) {
-    match event {
-        EngineEvent::GlobalSeedStarted { client_name } => {
-            info!(target: "joal_app::events", %client_name, "global seed started");
-        }
-        EngineEvent::GlobalSeedStopped => {
-            info!(target: "joal_app::events", "global seed stopped");
-        }
-        EngineEvent::TorrentFileAdded {
-            info_hash,
-            name,
-            total_size,
-        } => info!(
-            target: "joal_app::events",
-            %info_hash, %name, total_size, "torrent file added",
-        ),
-        EngineEvent::TorrentFileDeleted { info_hash, name } => info!(
-            target: "joal_app::events", %info_hash, %name, "torrent file deleted",
-        ),
-        EngineEvent::FailedToAddTorrentFile { name, reason } => warn!(
-            target: "joal_app::events", %name, %reason, "failed to add torrent file",
-        ),
-        EngineEvent::TooManyAnnouncesFailedInARow { info_hash, name } => warn!(
-            target: "joal_app::events", %info_hash, %name,
-            "torrent exceeded the consecutive-failure threshold",
-        ),
-        EngineEvent::ConfigLoaded { config } => info!(
-            target: "joal_app::events",
-            min_upload_rate = config.min_upload_rate,
-            max_upload_rate = config.max_upload_rate,
-            simultaneous_seed = config.simultaneous_seed,
-            active_client = %config.client,
-            "configuration reloaded",
-        ),
     }
-}
-
-/// One status line every [`STATUS_REPORT_INTERVAL`], sourced from the
-/// merger-maintained [`EngineSnapshot`]. No direct coupling to the
-/// orchestrator / bandwidth dispatcher — the snapshot is the contract.
-fn spawn_status_printer(
-    snapshot_rx: tokio::sync::watch::Receiver<EngineSnapshot>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(STATUS_REPORT_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            report_status(&snapshot_rx.borrow());
-        }
-    })
-}
-
-fn report_status(snapshot: &EngineSnapshot) {
-    info!(
-        target: "joal_app::status",
-        active_client = %snapshot.active_client_filename,
-        running_announcers = snapshot.torrents.len(),
-        global_bps = snapshot.global_upload_speed_bps,
-        "status report",
-    );
-    for t in &snapshot.torrents {
-        log_torrent_status(t);
-    }
-}
-
-fn log_torrent_status(t: &TorrentStatus) {
-    info!(
-        target: "joal_app::status",
-        info_hash = %t.info_hash,
-        name = %t.name,
-        total_size = t.total_size,
-        uploaded = t.uploaded_bytes,
-        current_speed_bps = t.current_speed_bps,
-        interval_s = ?t.last_known_interval,
-        seeders = ?t.last_known_seeders,
-        leechers = ?t.last_known_leechers,
-        consecutive_fails = t.consecutive_fails,
-        last_announced_ago_s = t.last_announced_at.map(|i| i.elapsed().as_secs()),
-        "torrent status",
-    );
+    false
 }
 
 #[cfg(test)]
@@ -188,7 +232,7 @@ mod tests {
     #[test]
     fn joal_conf_flag_parses() {
         let args = Args::try_parse_from(["joal-desktop", "--joal-conf", "/tmp/joal"]).unwrap();
-        assert_eq!(args.joal_conf, std::path::PathBuf::from("/tmp/joal"));
+        assert_eq!(args.joal_conf, PathBuf::from("/tmp/joal"));
     }
 
     #[test]

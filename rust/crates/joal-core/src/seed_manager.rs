@@ -57,6 +57,9 @@ use crate::snapshot::{EngineSnapshot, MergerPoke, TorrentStatus};
 use crate::torrent::TorrentFileProvider;
 use crate::ttorrent_client::{AnnouncerFactory, ClientOrchestrator};
 
+// Re-export for convenience — the UI needs these to call config helpers.
+pub use crate::config::AppConfiguration;
+
 /// How often the bandwidth dispatcher credits per-torrent `uploaded`
 /// counters. Java uses 1s — keep parity.
 const BANDWIDTH_TICK_PERIOD: Duration = Duration::from_secs(1);
@@ -83,6 +86,7 @@ pub struct SeedManager {
     merger: Option<JoinHandle<()>>,
     merger_shutdown: Option<oneshot::Sender<()>>,
     active_client_filename: String,
+    folders: JoalFolders,
 }
 
 impl SeedManager {
@@ -200,6 +204,7 @@ impl SeedManager {
             merger: Some(merger_handle),
             merger_shutdown: Some(shutdown_tx),
             active_client_filename,
+            folders,
         })
     }
 
@@ -229,6 +234,19 @@ impl SeedManager {
     #[must_use]
     pub fn active_client_filename(&self) -> &str {
         &self.active_client_filename
+    }
+
+    /// The folder layout used by this engine instance.
+    #[must_use]
+    pub fn folders(&self) -> &JoalFolders {
+        &self.folders
+    }
+
+    /// Move a torrent to the archive folder by info-hash.
+    pub async fn delete_torrent(&self, info_hash: &crate::torrent::InfoHash) {
+        self.torrent_provider
+            .move_to_archive_folder(info_hash)
+            .await;
     }
 
     /// Tear down every spawned task in reverse boot order.
