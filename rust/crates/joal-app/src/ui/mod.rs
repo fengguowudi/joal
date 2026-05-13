@@ -118,7 +118,10 @@ impl JoalApp {
         folders: Arc<JoalFolders>,
     ) -> Self {
         let current_snapshot = snapshot_rx.borrow().clone();
-        let config_edit = ConfigEditState::from_snapshot(&current_snapshot, None);
+        // Load initial config from disk so the config panel shows real values.
+        let initial_config = load_config_sync(&folders);
+        let config_edit =
+            ConfigEditState::from_snapshot(&current_snapshot, initial_config.as_ref());
         Self {
             snapshot_rx,
             events_rx,
@@ -208,7 +211,12 @@ impl JoalApp {
                 EngineResponse::Stopped => {
                     self.engine_running = false;
                 }
-                EngineResponse::Started => {
+                EngineResponse::Started {
+                    snapshot_rx,
+                    events_rx,
+                } => {
+                    self.snapshot_rx = snapshot_rx;
+                    self.events_rx = events_rx;
                     self.engine_running = true;
                 }
                 EngineResponse::Error(msg) => {
@@ -368,6 +376,14 @@ impl eframe::App for JoalApp {
     }
 }
 
+/// Load `config.json` synchronously for UI initialization. Returns `None` on
+/// any I/O or parse error — the config panel will fall back to defaults.
+fn load_config_sync(folders: &JoalFolders) -> Option<AppConfiguration> {
+    let path = folders.config_file();
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 fn format_event(event: &EngineEvent) -> String {
     match event {
         EngineEvent::GlobalSeedStarted { client_name } => {
@@ -385,6 +401,23 @@ fn format_event(event: &EngineEvent) -> String {
         }
         EngineEvent::TooManyAnnouncesFailedInARow { name, .. } => {
             format!("Too many failures: {name}")
+        }
+        EngineEvent::AnnounceStarted {
+            name, tracker_url, ..
+        } => {
+            format!("Announcing: {name} -> {tracker_url}")
+        }
+        EngineEvent::AnnounceSucceeded {
+            name,
+            seeders,
+            leechers,
+            interval,
+            ..
+        } => {
+            format!("Announce OK: {name} (S:{seeders} L:{leechers} I:{interval}s)")
+        }
+        EngineEvent::AnnounceFailed { name, error, .. } => {
+            format!("Announce FAILED: {name} - {error}")
         }
         EngineEvent::ConfigLoaded { config } => {
             format!(

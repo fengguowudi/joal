@@ -62,6 +62,29 @@ pub enum EngineEvent {
     /// be dropped from the seeding pool.
     TooManyAnnouncesFailedInARow { info_hash: InfoHash, name: String },
 
+    /// About to send an announce request to the tracker.
+    AnnounceStarted {
+        info_hash: InfoHash,
+        name: String,
+        tracker_url: String,
+    },
+
+    /// Announce succeeded. Carries the tracker's response fields.
+    AnnounceSucceeded {
+        info_hash: InfoHash,
+        name: String,
+        seeders: u32,
+        leechers: u32,
+        interval: u32,
+    },
+
+    /// Announce failed.
+    AnnounceFailed {
+        info_hash: InfoHash,
+        name: String,
+        error: String,
+    },
+
     /// Config has just been reloaded from disk. Carries the new settings —
     /// consumers can snapshot without touching the config provider.
     ConfigLoaded {

@@ -7,10 +7,12 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
 use joal_core::config::{self, AppConfiguration, JoalFolders};
+use joal_core::events::EngineEvent;
 use joal_core::seed_manager::SeedManager;
+use joal_core::snapshot::EngineSnapshot;
 use joal_core::torrent::InfoHash;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{error, info, warn};
 
 /// JOAL desktop — BitTorrent seeding client simulator.
@@ -35,10 +37,13 @@ pub enum EngineCommand {
 }
 
 /// Responses sent from the tokio runtime back to the UI.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum EngineResponse {
     Stopped,
-    Started,
+    Started {
+        snapshot_rx: watch::Receiver<EngineSnapshot>,
+        events_rx: broadcast::Receiver<EngineEvent>,
+    },
     Error(String),
     ClientList(Vec<String>),
 }
@@ -60,7 +65,7 @@ fn main() -> Result<()> {
     );
 
     let rt = Runtime::new()?;
-    let mut seed_manager = rt.block_on(SeedManager::start(&args.joal_conf))?;
+    let seed_manager = rt.block_on(SeedManager::start(&args.joal_conf))?;
 
     let snapshot_rx = seed_manager.snapshot_watch();
     let events_rx = seed_manager.subscribe_events();
@@ -74,9 +79,20 @@ fn main() -> Result<()> {
 
     let folders_arc = Arc::new(folders);
 
+    // Share the SeedManager with the command handler
+    let shared_sm = Arc::new(Mutex::new(Some(seed_manager)));
+
     // Spawn the command handler on the tokio runtime
     let cmd_folders = folders_arc.clone();
-    rt.spawn(command_handler(cmd_rx, resp_tx, cmd_folders));
+    let cmd_sm = shared_sm.clone();
+    let joal_conf = args.joal_conf.clone();
+    rt.spawn(command_handler(
+        cmd_rx,
+        resp_tx,
+        cmd_folders,
+        cmd_sm,
+        joal_conf,
+    ));
 
     let app = ui::JoalApp::new(
         snapshot_rx,
@@ -104,15 +120,23 @@ fn main() -> Result<()> {
     }
 
     info!(target: "joal_app::boot", "window closed, shutting down engine");
-    rt.block_on(seed_manager.stop());
+    rt.block_on(async {
+        let mut guard = shared_sm.lock().await;
+        if let Some(sm) = guard.as_mut() {
+            sm.stop().await;
+        }
+    });
     info!(target: "joal_app::boot", "joal-desktop stopped cleanly");
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn command_handler(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     resp_tx: mpsc::Sender<EngineResponse>,
     folders: Arc<JoalFolders>,
+    shared_sm: Arc<Mutex<Option<SeedManager>>>,
+    joal_conf: PathBuf,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -178,10 +202,46 @@ async fn command_handler(
                 }
             }
             EngineCommand::Stop => {
+                let mut guard = shared_sm.lock().await;
+                if let Some(mut sm) = guard.take() {
+                    sm.stop().await;
+                    info!(target: "joal_app::cmd", "engine stopped");
+                }
                 let _ = resp_tx.send(EngineResponse::Stopped).await;
             }
             EngineCommand::Start => {
-                let _ = resp_tx.send(EngineResponse::Started).await;
+                let mut guard = shared_sm.lock().await;
+                if guard.is_some() {
+                    // Already running
+                    let _ = resp_tx
+                        .send(EngineResponse::Error(
+                            "Engine is already running".to_owned(),
+                        ))
+                        .await;
+                    continue;
+                }
+                match SeedManager::start(&joal_conf).await {
+                    Ok(sm) => {
+                        let snapshot_rx = sm.snapshot_watch();
+                        let events_rx = sm.subscribe_events();
+                        *guard = Some(sm);
+                        info!(target: "joal_app::cmd", "engine started");
+                        let _ = resp_tx
+                            .send(EngineResponse::Started {
+                                snapshot_rx,
+                                events_rx,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        error!(target: "joal_app::cmd", error = %e, "failed to start engine");
+                        let _ = resp_tx
+                            .send(EngineResponse::Error(format!(
+                                "Failed to start engine: {e}"
+                            )))
+                            .await;
+                    }
+                }
             }
         }
     }

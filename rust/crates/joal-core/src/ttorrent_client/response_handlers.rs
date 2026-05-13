@@ -321,6 +321,69 @@ impl AnnounceEventPublisher {
 }
 
 impl AnnounceResponseHandler for AnnounceEventPublisher {
+    fn on_will_announce(&self, announcer: &Arc<Announcer>, _event: RequestEvent) {
+        let tracker_url = announcer.tracker_client().uri_provider().current();
+        self.sink.publish(EngineEvent::AnnounceStarted {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            tracker_url,
+        });
+    }
+
+    fn on_start_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
+        self.sink.publish(EngineEvent::AnnounceSucceeded {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            seeders: result.seeders().max(0) as u32,
+            leechers: result.leechers().max(0) as u32,
+            interval: result.interval().max(0) as u32,
+        });
+    }
+
+    fn on_regular_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
+        self.sink.publish(EngineEvent::AnnounceSucceeded {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            seeders: result.seeders().max(0) as u32,
+            leechers: result.leechers().max(0) as u32,
+            interval: result.interval().max(0) as u32,
+        });
+    }
+
+    fn on_stop_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
+        self.sink.publish(EngineEvent::AnnounceSucceeded {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            seeders: result.seeders().max(0) as u32,
+            leechers: result.leechers().max(0) as u32,
+            interval: result.interval().max(0) as u32,
+        });
+    }
+
+    fn on_start_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
+        self.sink.publish(EngineEvent::AnnounceFailed {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            error: error.to_string(),
+        });
+    }
+
+    fn on_regular_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
+        self.sink.publish(EngineEvent::AnnounceFailed {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            error: error.to_string(),
+        });
+    }
+
+    fn on_stop_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
+        self.sink.publish(EngineEvent::AnnounceFailed {
+            info_hash: announcer.torrent_info_hash().clone(),
+            name: announcer.torrent().name.clone(),
+            error: error.to_string(),
+        });
+    }
+
     fn on_too_many_failed_in_a_row(&self, announcer: &Arc<Announcer>, _err: &TooManyFailuresError) {
         self.sink
             .publish(EngineEvent::TooManyAnnouncesFailedInARow {
