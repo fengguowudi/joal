@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "现有 Scenario: Rust CLI boot sequence 描述了 joal-app 的 100 行 wiring 作为 composition root；本任务要把它迁进 joal-core/SeedManager，直接对照现有契约做前向重构"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "现有 Scenario: Rust announcer + orchestrator 固化了 handler chain 顺序、stop-drain drop-STARTED、archive-never-delete 等 invariant；SeedManager 重构不得破坏这些 invariant，需要对照实现 + 在尾部追加新的 Scenario: SeedManager composition seam"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "新增 SeedManager::start/stop 需要选择 thiserror(库) / anyhow(应用) 边界；SeedManager 位于 joal-core 库层，错误类型必须用 thiserror + 具体 variant，不能 anyhow::Result 外泄"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "joal-app 的 spawn_event_logger + spawn_snapshot_logger 会承担现有 tracing target 的职责；保持 target 前缀 joal_app::events / joal_app::status 不变，以免改变可观察日志行为"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁用 unwrap、默认不可变、显式 DI、测试边界——本任务新增 watch publisher + merger task + 集成测试需要全部对齐"}
+{"file": "重构准则.md", "reason": "纯内部重构，不改变可观察行为（tracker 字节、joal-conf 读写、CLI 日志可见性）；小步前进，不在同一提交里混入 feature 变更"}
+{"file": ".trellis/tasks/05-10-rewrite-joal-in-rust-with-egui-frontend/prd.md", "reason": "父任务 PRD 定义了 MVP-1/2/3 阶段与字节级兼容约束；本子任务是 MVP-1 收尾后向 MVP-2 的桥梁，必须符合父 PRD 的 Definition of Done 与 Out of Scope"}

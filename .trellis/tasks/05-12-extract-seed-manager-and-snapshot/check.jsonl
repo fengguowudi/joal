@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核验 SeedManager 公有 API 是否显式 DI、默认不可变、禁用 unwrap；新增集成测试是否覆盖关键路径"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核验 joal-core 层面 SeedManager::start/stop 的错误类型用 thiserror、错误语义与 Java 等价层对齐；joal-app 层面用 anyhow 汇聚"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核验现有 tracing target (joal_app::events / joal_app::status / joal_app::boot) 在 CLI 瘦身后仍然产生相同粒度和字段的日志行"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "核验 core 不泄漏内部实现（ClientOrchestrator/BandwidthDispatcher/TorrentFileProvider 不再 pub），joal-app 只持 SeedManager + 必要 value type"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "核验 announce URL / handler chain 顺序 / stop-drain drop-STARTED / archive-never-delete 等既有 invariant 未被本次 refactor 破坏"}
+{"file": "重构准则.md", "reason": "审查是否遵守不改变可观察行为、小步前进；CLI 日志观察面是本次重构的外部行为契约，必须验证其未发生可见漂移"}
