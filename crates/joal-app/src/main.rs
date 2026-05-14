@@ -199,18 +199,14 @@ async fn command_handler(
                 }
             },
             EngineCommand::DeleteTorrent(info_hash) => {
-                let hash_hex = info_hash.to_hex();
-                let moved = move_torrent_to_archive(
-                    &folders.torrents_dir,
-                    &folders.torrents_archive_dir,
-                    &hash_hex,
-                )
-                .await;
-                if !moved {
+                let guard = shared_sm.lock().await;
+                if let Some(sm) = guard.as_ref() {
+                    sm.delete_torrent(&info_hash).await;
+                } else {
                     let _ = resp_tx
-                        .send(EngineResponse::Error(format!(
-                            "Could not find torrent for hash {hash_hex}"
-                        )))
+                        .send(EngineResponse::Error(
+                            "Engine is not running".to_owned(),
+                        ))
                         .await;
                 }
             }
@@ -280,44 +276,6 @@ async fn command_handler(
             }
         }
     }
-}
-
-async fn move_torrent_to_archive(
-    torrents_dir: &std::path::Path,
-    archive_dir: &std::path::Path,
-    hash_hex: &str,
-) -> bool {
-    let Ok(mut entries) = tokio::fs::read_dir(torrents_dir).await else {
-        return false;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "torrent") {
-            continue;
-        }
-        if let Ok(torrent) = joal_core::torrent::MockedTorrent::from_file(&path).await
-            && torrent.info_hash.to_hex() == hash_hex
-        {
-            let _ = tokio::fs::create_dir_all(archive_dir).await;
-            if let Some(filename) = path.file_name() {
-                let target = archive_dir.join(filename);
-                // Try rename; on Windows may need remove-then-rename
-                if tokio::fs::rename(&path, &target).await.is_ok() {
-                    info!(
-                        target: "joal_app::cmd",
-                        source = %path.display(),
-                        "torrent moved to archive"
-                    );
-                    return true;
-                }
-                let _ = tokio::fs::remove_file(&target).await;
-                if tokio::fs::rename(&path, &target).await.is_ok() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]
