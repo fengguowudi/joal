@@ -145,3 +145,36 @@ Extracted shared helpers (lock_state, default_shared_state, compile_rand_regex, 
 - Manual UI testing on Windows desktop with display
 - Stability test (30+ minutes runtime)
 - Minor polish if needed after testing
+
+
+## Session 4: Clean up Java code, move Rust to repo root, close MVP2+MVP3
+
+**Date**: 2026-05-14
+**Task**: Clean up Java code, move Rust to repo root, close MVP2+MVP3
+**Branch**: `master`
+
+### Summary
+
+Removed Java codebase (153k lines), egui-main reference, build artifacts. Moved Rust workspace from rust/ to repo root. Fixed test fixture paths. Marked MVP2 and MVP3 tasks completed and archived all 6 finished tasks.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ee8a613` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
