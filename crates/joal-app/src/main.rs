@@ -20,9 +20,18 @@ use tracing::{error, info, warn};
 #[command(version, about)]
 struct Args {
     /// Path to the `joal-conf` directory (must contain `config.json`,
-    /// `clients/` and `torrents/`).
+    /// `clients/` and `torrents/`). Defaults to `resources/` next to the
+    /// executable.
     #[arg(long = "joal-conf", value_name = "DIR")]
-    joal_conf: PathBuf,
+    joal_conf: Option<PathBuf>,
+}
+
+fn resolve_joal_conf(arg: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = arg {
+        return p;
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    exe.parent().unwrap_or(exe.as_ref()).join("resources")
 }
 
 /// Commands sent from the UI thread to the tokio runtime thread.
@@ -48,6 +57,28 @@ pub enum EngineResponse {
     ClientList(Vec<String>),
 }
 
+fn configure_cjk_fonts(ctx: &egui::Context) {
+    let font_path = std::path::Path::new("C:\\Windows\\Fonts\\msyh.ttc");
+    if let Ok(font_data) = std::fs::read(font_path) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "msyh".to_owned(),
+            Arc::new(egui::FontData::from_owned(font_data)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "msyh".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("msyh".to_owned());
+        ctx.set_fonts(fonts);
+    }
+}
+
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_default_env()
@@ -58,14 +89,15 @@ fn init_tracing() {
 fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
+    let joal_conf = resolve_joal_conf(args.joal_conf);
     info!(
         target: "joal_app::boot",
-        joal_conf = %args.joal_conf.display(),
+        joal_conf = %joal_conf.display(),
         "joal-desktop starting (egui mode)",
     );
 
     let rt = Runtime::new()?;
-    let seed_manager = rt.block_on(SeedManager::start(&args.joal_conf))?;
+    let seed_manager = rt.block_on(SeedManager::start(&joal_conf))?;
 
     let snapshot_rx = seed_manager.snapshot_watch();
     let events_rx = seed_manager.subscribe_events();
@@ -85,13 +117,13 @@ fn main() -> Result<()> {
     // Spawn the command handler on the tokio runtime
     let cmd_folders = folders_arc.clone();
     let cmd_sm = shared_sm.clone();
-    let joal_conf = args.joal_conf.clone();
+    let joal_conf_for_cmd = joal_conf;
     rt.spawn(command_handler(
         cmd_rx,
         resp_tx,
         cmd_folders,
         cmd_sm,
-        joal_conf,
+        joal_conf_for_cmd,
     ));
 
     let app = ui::JoalApp::new(
@@ -114,7 +146,10 @@ fn main() -> Result<()> {
     if let Err(e) = eframe::run_native(
         "JOAL Desktop",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            configure_cjk_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     ) {
         warn!(target: "joal_app::boot", error = %e, "eframe exited with error");
     }
@@ -292,12 +327,14 @@ mod tests {
     #[test]
     fn joal_conf_flag_parses() {
         let args = Args::try_parse_from(["joal-desktop", "--joal-conf", "/tmp/joal"]).unwrap();
-        assert_eq!(args.joal_conf, PathBuf::from("/tmp/joal"));
+        assert_eq!(args.joal_conf, Some(PathBuf::from("/tmp/joal")));
     }
 
     #[test]
-    fn missing_joal_conf_flag_is_a_parse_error() {
-        let err = Args::try_parse_from(["joal-desktop"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    fn missing_joal_conf_flag_uses_default() {
+        let args = Args::try_parse_from(["joal-desktop"]).unwrap();
+        assert_eq!(args.joal_conf, None);
+        let resolved = resolve_joal_conf(args.joal_conf);
+        assert!(resolved.ends_with("resources"));
     }
 }
