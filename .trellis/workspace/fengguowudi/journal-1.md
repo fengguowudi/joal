@@ -178,3 +178,37 @@ Removed Java codebase (153k lines), egui-main reference, build artifacts. Moved 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Remove Java, restructure repo, write README
+
+**Date**: 2026-05-14
+**Task**: Remove Java, restructure repo, write README
+**Branch**: `master`
+
+### Summary
+
+Deleted Java codebase and moved Rust workspace to repo root. Wrote comprehensive README with project structure, build instructions, config reference, and architecture overview. Archived all completed tasks (MVP2, MVP3, RefreshPolicy, SeedManager, rewrite parent).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ee8a613` | (see git log) |
+| `d12d0f2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
