@@ -40,6 +40,7 @@
 //! is O(torrents) and cheaper than the alternative (diffing event payloads)
 //! for the 10–100 torrent case joal targets.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +74,43 @@ const TRACKER_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// safe to drop — 64 is well above the worst-case burst on a fresh start.
 const MERGER_POKE_CAPACITY: usize = 64;
 
+/// Resolves the public IP address reported to trackers.
+///
+/// The default implementation ([`DefaultIpResolver`]) polls third-party
+/// HTTP providers. Tests can inject a fixed IP or `None`.
+pub trait IpResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        proxy_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<IpAddr>> + Send + 'a>>;
+}
+
+/// Default IP resolver that polls external HTTP providers.
+pub struct DefaultIpResolver;
+
+impl IpResolver for DefaultIpResolver {
+    fn resolve<'a>(
+        &'a self,
+        proxy_url: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<IpAddr>> + Send + 'a>> {
+        Box::pin(fetch_public_ip(proxy_url))
+    }
+}
+
+/// Optional overrides for engine construction. Pass to
+/// [`SeedManager::start_with`] to inject test doubles.
+pub struct EngineOptions {
+    pub ip_resolver: Box<dyn IpResolver>,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            ip_resolver: Box::new(DefaultIpResolver),
+        }
+    }
+}
+
 /// Composition root.
 ///
 /// Owned by `joal-app` (CLI or egui front-end). Construct via
@@ -90,14 +128,17 @@ pub struct SeedManager {
 }
 
 impl SeedManager {
-    /// Boot every piece of `joal-core` from a `joal-conf/` directory and
-    /// publish the first snapshot frame.
-    ///
-    /// The returned [`SeedManager`] holds the bandwidth dispatcher task, the
-    /// torrent watcher task, the orchestrator tick loop and the merger task.
-    /// [`SeedManager::stop`] is the only clean way to tear them all down.
+    /// Boot the engine with default options. Convenience wrapper around
+    /// [`SeedManager::start_with`].
     #[allow(clippy::too_many_lines)]
     pub async fn start(joal_conf: &std::path::Path) -> Result<Self> {
+        Self::start_with(joal_conf, EngineOptions::default()).await
+    }
+
+    /// Boot every piece of `joal-core` from a `joal-conf/` directory using
+    /// the provided options (IP resolver, etc.).
+    #[allow(clippy::too_many_lines)]
+    pub async fn start_with(joal_conf: &std::path::Path, options: EngineOptions) -> Result<Self> {
         let (app_config, folders) = config::load(joal_conf)
             .await
             .with_context(|| format!("failed to load joal-conf from {}", joal_conf.display()))?;
@@ -147,7 +188,7 @@ impl SeedManager {
                 .unwrap_or_else(|_| ConnectionHandler::with_port_only(51413));
 
         let proxy_url = app_config.proxy_url();
-        let ip = fetch_public_ip(proxy_url.as_deref()).await;
+        let ip = options.ip_resolver.resolve(proxy_url.as_deref()).await;
         if let Some(addr) = ip {
             info!(
                 target: "joal_core::seed_manager",
