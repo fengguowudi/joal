@@ -1908,7 +1908,6 @@ name = "joal-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "joal-testing",
  "notify",
  "percent-encoding",
  "rand 0.8.6",
@@ -1927,15 +1926,6 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
-]
-
-[[package]]
-name = "joal-testing"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

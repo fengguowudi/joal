@@ -5,7 +5,8 @@ use joal_core::client::{
     BitTorrentClientConfig, Casing, HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef, KeyConfig,
     KeyGenerator, PeerIdAlgorithmDef, PeerIdConfig, PeerIdGenerator, RegexPeerIdAlgorithm,
 };
-use joal_testing::sample_client_file;
+mod common;
+use common::sample_client_file;
 
 #[test]
 fn qbittorrent_4_5_0_golden_parses_from_embedded_repository_file() {

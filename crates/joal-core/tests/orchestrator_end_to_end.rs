@@ -15,7 +15,8 @@ use joal_core::config::{AppConfiguration, JoalFolders};
 use joal_core::events::NoopSink;
 use joal_core::torrent::TorrentFileProvider;
 use joal_core::ttorrent_client::{AnnouncerFactory, ClientOrchestrator};
-use joal_testing::sample_client_file;
+mod common;
+use common::sample_client_file;
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

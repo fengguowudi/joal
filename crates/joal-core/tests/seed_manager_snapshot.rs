@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use joal_core::events::EngineEvent;
 use joal_core::seed_manager::SeedManager;
-use joal_testing::sample_client_file;
+mod common;
+use common::sample_client_file;
 use tokio::sync::broadcast::error::TryRecvError;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

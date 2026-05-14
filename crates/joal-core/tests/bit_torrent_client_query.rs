@@ -5,7 +5,8 @@ use joal_core::client::{
     BitTorrentClient, BitTorrentClientConfig, ConnectionHandler, RequestEvent,
 };
 use joal_core::torrent::InfoHash;
-use joal_testing::sample_client_file;
+mod common;
+use common::sample_client_file;
 use regex::Regex;
 
 fn sample_info_hash() -> InfoHash {

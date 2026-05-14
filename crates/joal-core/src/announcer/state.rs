@@ -304,7 +304,8 @@ mod tests {
     use crate::torrent::{InfoHash, MockedTorrent};
 
     fn qb_client() -> BitTorrentClient {
-        let cfg: BitTorrentClientConfig = joal_testing::sample_client_file().try_into().unwrap();
+        let json = include_str!("../../../../resources/clients/qbittorrent-4.5.0.client");
+        let cfg: BitTorrentClientConfig = json.try_into().unwrap();
         BitTorrentClient::new(cfg).unwrap()
     }
 

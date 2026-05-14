@@ -20,7 +20,8 @@ use joal_core::client::{
 };
 use joal_core::config::AppConfiguration;
 use joal_core::torrent::{InfoHash, MockedTorrent};
-use joal_testing::sample_client_file;
+mod common;
+use common::sample_client_file;
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
