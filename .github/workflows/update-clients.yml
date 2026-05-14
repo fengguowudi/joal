@@ -1,4 +1,4 @@
-name: Update qBittorrent Clients
+name: Update Clients
 
 on:
   schedule:
@@ -17,14 +17,21 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/qbt_analyzer
-          key: qbt-cache-${{ hashFiles('scripts/client-update/qbittorrent_analyzer.sh') }}
-          restore-keys: qbt-cache-
+          path: |
+            ~/.cache/qbt_analyzer
+            ~/.cache/transmission_analyzer
+          key: client-update-cache-${{ hashFiles('scripts/client-update/*.sh') }}
+          restore-keys: client-update-cache-
 
-      - name: Generate missing client files
+      - name: Generate missing qBittorrent client files
         run: |
           chmod +x scripts/client-update/qbittorrent_analyzer.sh
           scripts/client-update/qbittorrent_analyzer.sh --batch-update resources/clients
+
+      - name: Generate missing Transmission client files
+        run: |
+          chmod +x scripts/client-update/transmission_analyzer.sh
+          scripts/client-update/transmission_analyzer.sh --batch-update resources/clients
 
       - name: Check for new client files
         id: changes
@@ -39,5 +46,5 @@ jobs:
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
           git add resources/clients/
-          git commit -m "chore: add missing qBittorrent client files"
+          git commit -m "chore: add missing client files (qBittorrent + Transmission)"
           git push
