@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-05-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~214 | Active |
+| `journal-1.md` | ~247 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-05-14 | CJK font fix and default resources path | `d0371cd` | `master` |
 | 5 | 2026-05-14 | Remove Java, restructure repo, write README | `ee8a613`, `d12d0f2` | `master` |
 | 4 | 2026-05-14 | Clean up Java code, move Rust to repo root, close MVP2+MVP3 | `ee8a613` | `master` |
 | 3 | 2026-05-13 | Cleanup duplicate helpers in key/peer_id generators | `660ecde` | `master` |

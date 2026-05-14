@@ -212,3 +212,36 @@ Deleted Java codebase and moved Rust workspace to repo root. Wrote comprehensive
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: CJK font fix and default resources path
+
+**Date**: 2026-05-14
+**Task**: CJK font fix and default resources path
+**Branch**: `master`
+
+### Summary
+
+Fixed Chinese text rendering by loading Microsoft YaHei font at startup. Made --joal-conf optional, defaulting to exe-relative resources/ folder for double-click usage. Added config.example.json.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d0371cd` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
