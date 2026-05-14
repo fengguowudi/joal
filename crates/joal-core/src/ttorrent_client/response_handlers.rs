@@ -32,8 +32,7 @@ use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::events::{EngineEvent, EngineEventSink};
 use crate::snapshot::MergerPoke;
-use crate::torrent::InfoHash;
-use crate::ttorrent_client::announcer_executor::AnnounceResponseCallback;
+use crate::ttorrent_client::announcer_executor::{AnnounceResponseCallback, OrchestratorControl};
 use crate::ttorrent_client::delay_queue::DelayQueue;
 
 /// Outcome of an announce round-trip.
@@ -227,21 +226,14 @@ impl AnnounceResponseHandler for BandwidthDispatcherNotifier {
 }
 
 /// Bridges the handler chain into the orchestrator's drop/refill logic.
-pub trait ClientNotificationSink: Send + Sync {
-    fn on_too_many_failed(&self, info_hash: &InfoHash);
-    fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash);
-    fn on_no_more_peers(&self, info_hash: &InfoHash);
-    fn on_torrent_has_stopped(&self, info_hash: &InfoHash);
-}
-
 pub struct ClientNotifier {
-    sink: Arc<dyn ClientNotificationSink>,
+    control: Arc<dyn OrchestratorControl>,
 }
 
 impl ClientNotifier {
     #[must_use]
-    pub fn new(sink: Arc<dyn ClientNotificationSink>) -> Self {
-        Self { sink }
+    pub fn new(control: Arc<dyn OrchestratorControl>) -> Self {
+        Self { control }
     }
 }
 
@@ -256,26 +248,26 @@ impl AnnounceResponseHandler for ClientNotifier {
             (RequestEvent::Started, AnnounceOutcome::Success(r))
                 if r.seeders() < 1 || r.leechers() < 1 =>
             {
-                self.sink.on_no_more_peers(announcer.torrent_info_hash());
+                self.control.on_no_more_peers(announcer.torrent_info_hash());
             }
             (RequestEvent::None, AnnounceOutcome::Success(r)) => {
                 if r.seeders() < 1 || r.leechers() < 1 {
-                    self.sink.on_no_more_peers(announcer.torrent_info_hash());
+                    self.control.on_no_more_peers(announcer.torrent_info_hash());
                     return;
                 }
                 if announcer.has_reached_upload_ratio_limit() {
-                    self.sink
+                    self.control
                         .on_upload_ratio_limit_reached(announcer.torrent_info_hash());
                 }
             }
             (RequestEvent::Stopped, AnnounceOutcome::Success(_)) => {
                 debug!(info_hash = %announcer.torrent_info_hash(), "torrent has stopped");
-                self.sink
+                self.control
                     .on_torrent_has_stopped(announcer.torrent_info_hash());
             }
             (_, AnnounceOutcome::TooManyFailures(_)) => {
                 debug!(info_hash = %announcer.torrent_info_hash(), "torrent has failed too many times");
-                self.sink.on_too_many_failed(announcer.torrent_info_hash());
+                self.control.on_too_many_failed(announcer.torrent_info_hash());
             }
             _ => {}
         }

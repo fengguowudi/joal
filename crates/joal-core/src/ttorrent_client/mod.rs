@@ -16,7 +16,7 @@ pub mod client;
 pub mod delay_queue;
 pub mod response_handlers;
 
-pub use announcer_executor::{AnnounceResponseCallback, AnnouncerExecutor};
+pub use announcer_executor::{AnnounceResponseCallback, AnnouncerExecutor, OrchestratorControl};
 pub use announcer_factory::AnnouncerFactory;
 pub use client::{ClientError, ClientOrchestrator, ORCHESTRATOR_TICK};
 pub use delay_queue::{DelayQueue, InfoHashAble};

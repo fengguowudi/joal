@@ -42,18 +42,21 @@ pub trait AnnounceResponseCallback: Send + Sync {
 /// Async-friendly executor that dispatches announces to a handler chain.
 pub struct AnnouncerExecutor {
     callback: Arc<dyn AnnounceResponseCallback>,
-    resolver: Arc<dyn AnnouncerResolver>,
+    control: Arc<dyn OrchestratorControl>,
     running: Arc<Mutex<HashMap<InfoHash, RunningTask>>>,
 }
 
-/// Strategy used to look up the [`Announcer`] for a given request.
+/// Strategy used to look up the [`Announcer`] for a given request and
+/// receive lifecycle notifications from the handler chain.
 ///
-/// The Java side puts the announcer directly on the `AnnounceRequest`; the
-/// Rust `AnnounceRequest` is a slim value type, so the executor queries a
-/// resolver (usually the `ClientOrchestrator`) to fetch the announcer when
-/// it's time to run.
-pub trait AnnouncerResolver: Send + Sync {
-    fn resolve(&self, info_hash: &InfoHash) -> Option<Arc<Announcer>>;
+/// Combines the former `AnnouncerResolver` and `ClientNotificationSink`
+/// traits into a single seam that the orchestrator implements.
+pub trait OrchestratorControl: Send + Sync {
+    fn resolve_announcer(&self, info_hash: &InfoHash) -> Option<Arc<Announcer>>;
+    fn on_too_many_failed(&self, info_hash: &InfoHash);
+    fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash);
+    fn on_no_more_peers(&self, info_hash: &InfoHash);
+    fn on_torrent_has_stopped(&self, info_hash: &InfoHash);
 }
 
 struct RunningTask {
@@ -65,24 +68,21 @@ impl AnnouncerExecutor {
     #[must_use]
     pub fn new(
         callback: Arc<dyn AnnounceResponseCallback>,
-        resolver: Arc<dyn AnnouncerResolver>,
+        control: Arc<dyn OrchestratorControl>,
     ) -> Self {
         Self {
             callback,
-            resolver,
+            control,
             running: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Dispatch `request` to the background runtime.
-    ///
-    /// The task runs the full Java flow: `on_will_announce` → `announce` →
-    /// `on_success` / `on_failure` / `on_too_many_failures`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn execute(&self, request: AnnounceRequest) {
         let info_hash = request.info_hash().clone();
         let event = request.event();
-        let Some(announcer) = self.resolver.resolve(&info_hash) else {
+        let Some(announcer) = self.control.resolve_announcer(&info_hash) else {
             debug!(info_hash = %info_hash, "execute: announcer not resolvable, skipping");
             return;
         };

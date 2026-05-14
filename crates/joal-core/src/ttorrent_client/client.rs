@@ -31,12 +31,12 @@ use crate::snapshot::MergerPoke;
 use crate::torrent::{
     InfoHash, MockedTorrent, NoMoreTorrentsError, TorrentFileChangeAware, TorrentFileProvider,
 };
-use crate::ttorrent_client::announcer_executor::{AnnouncerExecutor, AnnouncerResolver};
+use crate::ttorrent_client::announcer_executor::{AnnouncerExecutor, OrchestratorControl};
 use crate::ttorrent_client::announcer_factory::AnnouncerFactory;
 use crate::ttorrent_client::delay_queue::DelayQueue;
 use crate::ttorrent_client::response_handlers::{
     AnnounceEventPublisher, AnnounceReEnqueuer, AnnounceResponseHandlerChain,
-    BandwidthDispatcherNotifier, ClientNotificationSink, ClientNotifier, MergerPokeNotifier,
+    BandwidthDispatcherNotifier, ClientNotifier, MergerPokeNotifier,
 };
 
 /// Period between delay-queue drain attempts. Matches Java's
@@ -69,6 +69,7 @@ struct SharedState {
     events: Arc<dyn EngineEventSink>,
     delay_queue: Arc<DelayQueue<AnnounceRequest>>,
     executor: Mutex<Option<Arc<AnnouncerExecutor>>>,
+    weak_self: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl ClientOrchestrator {
@@ -98,7 +99,9 @@ impl ClientOrchestrator {
             events: Arc::clone(events),
             delay_queue: Arc::clone(&delay_queue),
             executor: Mutex::new(None),
+            weak_self: std::sync::OnceLock::new(),
         });
+        let _ = shared.weak_self.set(Arc::downgrade(&shared));
 
         // Build the response-handler chain: order matters — publisher first
         // for UX parity with Java.
@@ -108,9 +111,8 @@ impl ClientOrchestrator {
         chain.append(Arc::new(BandwidthDispatcherNotifier::new(bandwidth)));
         // ClientNotifier comes last among the behaviour-bearing handlers: its
         // callbacks must see the fully-wired state.
-        let notifier_sink: Arc<dyn ClientNotificationSink> =
-            Arc::new(ClientNotifierSink::new(Arc::clone(&shared)));
-        chain.append(Arc::new(ClientNotifier::new(notifier_sink)));
+        let control: Arc<dyn OrchestratorControl> = Arc::clone(&shared) as _;
+        chain.append(Arc::new(ClientNotifier::new(Arc::clone(&control))));
         // The merger poke is strictly a snapshot trigger — it runs after every
         // other handler so the facade fields it triggers on already reflect
         // the new announce's side-effects.
@@ -119,10 +121,7 @@ impl ClientOrchestrator {
         }
 
         let callback = chain.into_callback();
-        let resolver: Arc<dyn AnnouncerResolver> = Arc::new(OrchestratorResolver {
-            shared: Arc::clone(&shared),
-        });
-        let executor = Arc::new(AnnouncerExecutor::new(callback, resolver));
+        let executor = Arc::new(AnnouncerExecutor::new(callback, control));
 
         {
             let mut slot = shared
@@ -279,6 +278,14 @@ impl std::fmt::Debug for ClientOrchestrator {
 }
 
 impl SharedState {
+    fn self_arc(&self) -> Arc<Self> {
+        self.weak_self
+            .get()
+            .expect("weak_self not initialized")
+            .upgrade()
+            .expect("SharedState dropped while still in use")
+    }
+
     async fn add_torrent_from_directory(&self) -> Result<(), NoMoreTorrentsError> {
         let excluded: HashSet<InfoHash> = {
             let guard = self
@@ -358,17 +365,12 @@ async fn orchestrator_loop(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Glue types wiring SharedState into the rest of the handler chain.
+// OrchestratorControl implementation on SharedState.
 // ─────────────────────────────────────────────────────────────────────────
 
-struct OrchestratorResolver {
-    shared: Arc<SharedState>,
-}
-
-impl AnnouncerResolver for OrchestratorResolver {
-    fn resolve(&self, info_hash: &InfoHash) -> Option<Arc<Announcer>> {
+impl OrchestratorControl for SharedState {
+    fn resolve_announcer(&self, info_hash: &InfoHash) -> Option<Arc<Announcer>> {
         let guard = self
-            .shared
             .announcers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -376,6 +378,71 @@ impl AnnouncerResolver for OrchestratorResolver {
             .iter()
             .find(|a| a.torrent_info_hash() == info_hash)
             .cloned()
+    }
+
+    fn on_too_many_failed(&self, info_hash: &InfoHash) {
+        if self.is_stopping() {
+            self.remove_announcer(info_hash);
+            return;
+        }
+        self.remove_announcer(info_hash);
+        let shared = self.self_arc();
+        let info_hash = info_hash.clone();
+        tokio::spawn(async move {
+            shared
+                .torrent_provider
+                .move_to_archive_folder(&info_hash)
+                .await;
+            let _ = shared.add_torrent_from_directory().await;
+        });
+    }
+
+    fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash) {
+        info!(info_hash = %info_hash, "upload ratio reached, archiving torrent");
+        let shared = self.self_arc();
+        let info_hash = info_hash.clone();
+        tokio::spawn(async move {
+            shared
+                .torrent_provider
+                .move_to_archive_folder(&info_hash)
+                .await;
+        });
+    }
+
+    fn on_no_more_peers(&self, info_hash: &InfoHash) {
+        if self.app_config.keep_torrent_with_zero_leechers {
+            return;
+        }
+        let shared = self.self_arc();
+        let info_hash = info_hash.clone();
+        tokio::spawn(async move {
+            shared
+                .torrent_provider
+                .move_to_archive_folder(&info_hash)
+                .await;
+        });
+    }
+
+    fn on_torrent_has_stopped(&self, info_hash: &InfoHash) {
+        if self.is_stopping() {
+            self.remove_announcer(info_hash);
+            return;
+        }
+        let shared = self.self_arc();
+        let stopped = info_hash.clone();
+        let executor = self
+            .executor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        tokio::spawn(async move {
+            let _ = shared.add_torrent_from_directory().await;
+            shared.remove_announcer(&stopped);
+            if let Some(exec) = executor {
+                exec.deny(&stopped);
+            }
+        });
     }
 }
 
@@ -430,87 +497,6 @@ impl TorrentFileChangeAware for TorrentChangeAdapter {
                 Duration::from_secs(1),
             );
         }
-    }
-}
-
-struct ClientNotifierSink {
-    shared: Arc<SharedState>,
-}
-
-impl ClientNotifierSink {
-    fn new(shared: Arc<SharedState>) -> Self {
-        Self { shared }
-    }
-
-    fn executor(&self) -> Option<Arc<AnnouncerExecutor>> {
-        self.shared
-            .executor
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .map(Arc::clone)
-    }
-}
-
-impl ClientNotificationSink for ClientNotifierSink {
-    fn on_too_many_failed(&self, info_hash: &InfoHash) {
-        if self.shared.is_stopping() {
-            self.shared.remove_announcer(info_hash);
-            return;
-        }
-        self.shared.remove_announcer(info_hash);
-        let shared = Arc::clone(&self.shared);
-        let info_hash = info_hash.clone();
-        tokio::spawn(async move {
-            shared
-                .torrent_provider
-                .move_to_archive_folder(&info_hash)
-                .await;
-            let _ = shared.add_torrent_from_directory().await;
-        });
-    }
-
-    fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash) {
-        info!(info_hash = %info_hash, "upload ratio reached, archiving torrent");
-        let shared = Arc::clone(&self.shared);
-        let info_hash = info_hash.clone();
-        tokio::spawn(async move {
-            shared
-                .torrent_provider
-                .move_to_archive_folder(&info_hash)
-                .await;
-        });
-    }
-
-    fn on_no_more_peers(&self, info_hash: &InfoHash) {
-        if self.shared.app_config.keep_torrent_with_zero_leechers {
-            return;
-        }
-        let shared = Arc::clone(&self.shared);
-        let info_hash = info_hash.clone();
-        tokio::spawn(async move {
-            shared
-                .torrent_provider
-                .move_to_archive_folder(&info_hash)
-                .await;
-        });
-    }
-
-    fn on_torrent_has_stopped(&self, info_hash: &InfoHash) {
-        if self.shared.is_stopping() {
-            self.shared.remove_announcer(info_hash);
-            return;
-        }
-        let shared = Arc::clone(&self.shared);
-        let stopped = info_hash.clone();
-        let executor = self.executor();
-        tokio::spawn(async move {
-            let _ = shared.add_torrent_from_directory().await;
-            shared.remove_announcer(&stopped);
-            if let Some(exec) = executor {
-                exec.deny(&stopped);
-            }
-        });
     }
 }
 
