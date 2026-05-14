@@ -1,6 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对 Rust 代码是否遵循与 Java 版一致的质量红线：显式依赖注入、默认不可变、测试覆盖、禁用 unwrap(tests 除外)"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "核对错误处理是否在库/应用边界正确区分 thiserror/anyhow，是否保留与 Java 版等价的错误语义"}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对 tracing 日志级别使用、字段化日志、以及是否保留 Java 版关键日志点"}
-{"file": ".trellis/spec/backend/directory-structure.md", "reason": "核对 rust/crates 组织是否保持 core 与 app 解耦、没有引入循环依赖、没有把 UI 关注点泄漏到 core"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "核对 joal-conf 文件读写行为与 Java 版兼容：路径约定、文件名、archive 规则、热更语义"}
-{"file": "重构准则.md", "reason": "审查改动是否遵守"不改变可观察行为、每次小步"的重构原则；本次是异构语言重写，"观察行为"特指 tracker announce 字节级兼容 + config/torrent 文件读写一致"}

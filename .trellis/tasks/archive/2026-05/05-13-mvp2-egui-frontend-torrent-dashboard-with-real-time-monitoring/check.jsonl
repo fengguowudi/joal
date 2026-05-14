@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify clippy/fmt/test compliance after implementation"}
-{"file": ".trellis/tasks/05-13-mvp2-egui-frontend-torrent-dashboard-with-real-time-monitoring/prd.md", "reason": "Check acceptance criteria are met"}
-{"file": "rust/crates/joal-app/src/main.rs", "reason": "Verify eframe integration and graceful shutdown"}
-{"file": "rust/crates/joal-app/Cargo.toml", "reason": "Verify egui dependencies are correctly declared"}

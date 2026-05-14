@@ -17,5 +17,11 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Trellis backups
-.trellis/.backup-*/
+# AI tooling and local config
+.claude/
+.codex/
+.cursor/
+.trellis/
+.agents/
+AGENTS.md
+skills-lock.json
