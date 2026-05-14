@@ -11,3 +11,11 @@ Cargo.lock.bak
 # OS
 .DS_Store
 Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Trellis backups
+.trellis/.backup-*/
