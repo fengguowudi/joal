@@ -1,0 +1,43 @@
+name: Update qBittorrent Clients
+
+on:
+  schedule:
+    - cron: '0 6 1,15 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-clients:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/qbt_analyzer
+          key: qbt-cache-${{ hashFiles('scripts/client-update/qbittorrent_analyzer.sh') }}
+          restore-keys: qbt-cache-
+
+      - name: Generate missing client files
+        run: |
+          chmod +x scripts/client-update/qbittorrent_analyzer.sh
+          scripts/client-update/qbittorrent_analyzer.sh --batch-update resources/clients
+
+      - name: Check for new client files
+        id: changes
+        run: |
+          if [[ -n "$(git status --porcelain resources/clients/)" ]]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add resources/clients/
+          git commit -m "chore: add missing qBittorrent client files"
+          git push
