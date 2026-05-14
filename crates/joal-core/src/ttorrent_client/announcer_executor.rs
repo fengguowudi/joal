@@ -17,10 +17,11 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::announcer::{
-    AnnounceRequest, Announcer, AnnouncerError, SuccessAnnounceResponse, TooManyFailuresError,
+    AnnounceRequest, Announcer, AnnouncerError,
 };
 use crate::client::RequestEvent;
 use crate::torrent::InfoHash;
+use crate::ttorrent_client::response_handlers::AnnounceOutcome;
 
 /// Matches Java's `awaitTermination(10, SECONDS)` for outstanding announces.
 pub const AWAIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,18 +31,11 @@ pub const AWAIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `AnnounceResponseCallback`.
 pub trait AnnounceResponseCallback: Send + Sync {
     fn on_will_announce(&self, event: RequestEvent, announcer: &Arc<Announcer>);
-    fn on_success(
+    fn on_announce_result(
         &self,
         event: RequestEvent,
         announcer: &Arc<Announcer>,
-        result: SuccessAnnounceResponse,
-    );
-    fn on_failure(&self, event: RequestEvent, announcer: &Arc<Announcer>, error: &AnnouncerError);
-    fn on_too_many_failures(
-        &self,
-        event: RequestEvent,
-        announcer: &Arc<Announcer>,
-        err: &TooManyFailuresError,
+        outcome: &AnnounceOutcome,
     );
 }
 
@@ -98,15 +92,12 @@ impl AnnouncerExecutor {
         let key = info_hash.clone();
         let handle = tokio::spawn(async move {
             callback.on_will_announce(event, &announcer_task);
-            match announcer_task.announce(event).await {
-                Ok(result) => callback.on_success(event, &announcer_task, result),
-                Err(AnnouncerError::TooManyFailures(err)) => {
-                    callback.on_too_many_failures(event, &announcer_task, &err);
-                }
-                Err(err) => {
-                    callback.on_failure(event, &announcer_task, &err);
-                }
-            }
+            let outcome = match announcer_task.announce(event).await {
+                Ok(result) => AnnounceOutcome::Success(result),
+                Err(AnnouncerError::TooManyFailures(err)) => AnnounceOutcome::TooManyFailures(err),
+                Err(err) => AnnounceOutcome::Failure(err),
+            };
+            callback.on_announce_result(event, &announcer_task, &outcome);
             let mut running = running.lock().unwrap_or_else(PoisonError::into_inner);
             running.remove(&key);
         });

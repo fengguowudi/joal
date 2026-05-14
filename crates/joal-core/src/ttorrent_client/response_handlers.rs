@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::announcer::{
     AnnounceRequest, Announcer, AnnouncerError, AnnouncerFacade, SuccessAnnounceResponse,
@@ -36,23 +36,22 @@ use crate::torrent::InfoHash;
 use crate::ttorrent_client::announcer_executor::AnnounceResponseCallback;
 use crate::ttorrent_client::delay_queue::DelayQueue;
 
-/// Per-event handler. Mirror of Java `AnnounceResponseHandler`.
+/// Outcome of an announce round-trip.
+#[derive(Debug)]
+pub enum AnnounceOutcome {
+    Success(SuccessAnnounceResponse),
+    Failure(AnnouncerError),
+    TooManyFailures(TooManyFailuresError),
+}
+
+/// Per-event handler. Simplified from the Java visitor-style 8-method trait.
 pub trait AnnounceResponseHandler: Send + Sync {
     fn on_will_announce(&self, _announcer: &Arc<Announcer>, _event: RequestEvent) {}
-
-    fn on_start_success(&self, _announcer: &Arc<Announcer>, _result: SuccessAnnounceResponse) {}
-    fn on_start_fails(&self, _announcer: &Arc<Announcer>, _error: &AnnouncerError) {}
-
-    fn on_regular_success(&self, _announcer: &Arc<Announcer>, _result: SuccessAnnounceResponse) {}
-    fn on_regular_fails(&self, _announcer: &Arc<Announcer>, _error: &AnnouncerError) {}
-
-    fn on_stop_success(&self, _announcer: &Arc<Announcer>, _result: SuccessAnnounceResponse) {}
-    fn on_stop_fails(&self, _announcer: &Arc<Announcer>, _error: &AnnouncerError) {}
-
-    fn on_too_many_failed_in_a_row(
+    fn on_announce_result(
         &self,
         _announcer: &Arc<Announcer>,
-        _err: &TooManyFailuresError,
+        _event: RequestEvent,
+        _outcome: &AnnounceOutcome,
     ) {
     }
 }
@@ -102,53 +101,24 @@ impl AnnounceResponseCallback for AnnounceResponseHandlerChain {
         }
     }
 
-    fn on_success(
+    fn on_announce_result(
         &self,
         event: RequestEvent,
         announcer: &Arc<Announcer>,
-        result: SuccessAnnounceResponse,
+        outcome: &AnnounceOutcome,
     ) {
         for h in &self.handlers {
-            match event {
-                RequestEvent::Started => h.on_start_success(announcer, result),
-                RequestEvent::None => h.on_regular_success(announcer, result),
-                RequestEvent::Stopped => h.on_stop_success(announcer, result),
-                RequestEvent::Completed => {
-                    warn!(?event, "chain: success event not handled");
-                }
-            }
-        }
-    }
-
-    fn on_failure(&self, event: RequestEvent, announcer: &Arc<Announcer>, error: &AnnouncerError) {
-        for h in &self.handlers {
-            match event {
-                RequestEvent::Started => h.on_start_fails(announcer, error),
-                RequestEvent::None => h.on_regular_fails(announcer, error),
-                RequestEvent::Stopped => h.on_stop_fails(announcer, error),
-                RequestEvent::Completed => {
-                    warn!(?event, "chain: failure event not handled");
-                }
-            }
-        }
-    }
-
-    fn on_too_many_failures(
-        &self,
-        _event: RequestEvent,
-        announcer: &Arc<Announcer>,
-        err: &TooManyFailuresError,
-    ) {
-        for h in &self.handlers {
-            h.on_too_many_failed_in_a_row(announcer, err);
+            h.on_announce_result(announcer, event, outcome);
         }
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Concrete handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Re-enqueues the next announce based on the Java rules: success uses the
 /// server-supplied interval; failure uses the announcer's `last_known_interval`.
-///
-/// Port of Java `AnnounceReEnqueuer`.
 pub struct AnnounceReEnqueuer {
     delay_queue: Arc<DelayQueue<AnnounceRequest>>,
 }
@@ -161,52 +131,51 @@ impl AnnounceReEnqueuer {
 }
 
 impl AnnounceResponseHandler for AnnounceReEnqueuer {
-    fn on_start_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "enqueue regular after start success");
-        self.delay_queue.add_or_replace(
-            AnnounceRequest::create_regular(announcer.torrent_info_hash().clone()),
-            seconds(result.interval()),
-        );
-    }
-
-    fn on_start_fails(&self, announcer: &Arc<Announcer>, _error: &AnnouncerError) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "enqueue start (retry) after start failure");
-        self.delay_queue.add_or_replace(
-            AnnounceRequest::create_start(announcer.torrent_info_hash().clone()),
-            seconds(announcer.last_known_interval()),
-        );
-    }
-
-    fn on_regular_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "enqueue regular after regular success");
-        self.delay_queue.add_or_replace(
-            AnnounceRequest::create_regular(announcer.torrent_info_hash().clone()),
-            seconds(result.interval()),
-        );
-    }
-
-    fn on_regular_fails(&self, announcer: &Arc<Announcer>, _error: &AnnouncerError) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "enqueue regular (retry) after regular failure");
-        self.delay_queue.add_or_replace(
-            AnnounceRequest::create_regular(announcer.torrent_info_hash().clone()),
-            seconds(announcer.last_known_interval()),
-        );
-    }
-
-    fn on_stop_fails(&self, announcer: &Arc<Announcer>, _error: &AnnouncerError) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "enqueue stop (retry) after stop failure");
-        self.delay_queue.add_or_replace(
-            AnnounceRequest::create_stop(announcer.torrent_info_hash().clone()),
-            Duration::ZERO,
-        );
+    fn on_announce_result(
+        &self,
+        announcer: &Arc<Announcer>,
+        event: RequestEvent,
+        outcome: &AnnounceOutcome,
+    ) {
+        let ih = announcer.torrent_info_hash().clone();
+        match (event, outcome) {
+            (RequestEvent::Started, AnnounceOutcome::Success(r)) => {
+                debug!(info_hash = %ih, "enqueue regular after start success");
+                self.delay_queue
+                    .add_or_replace(AnnounceRequest::create_regular(ih), seconds(r.interval()));
+            }
+            (RequestEvent::Started, AnnounceOutcome::Failure(_)) => {
+                debug!(info_hash = %ih, "enqueue start (retry) after start failure");
+                self.delay_queue.add_or_replace(
+                    AnnounceRequest::create_start(ih),
+                    seconds(announcer.last_known_interval()),
+                );
+            }
+            (RequestEvent::None, AnnounceOutcome::Success(r)) => {
+                debug!(info_hash = %ih, "enqueue regular after regular success");
+                self.delay_queue
+                    .add_or_replace(AnnounceRequest::create_regular(ih), seconds(r.interval()));
+            }
+            (RequestEvent::None, AnnounceOutcome::Failure(_)) => {
+                debug!(info_hash = %ih, "enqueue regular (retry) after regular failure");
+                self.delay_queue.add_or_replace(
+                    AnnounceRequest::create_regular(ih),
+                    seconds(announcer.last_known_interval()),
+                );
+            }
+            (RequestEvent::Stopped, AnnounceOutcome::Failure(_)) => {
+                debug!(info_hash = %ih, "enqueue stop (retry) after stop failure");
+                self.delay_queue
+                    .add_or_replace(AnnounceRequest::create_stop(ih), Duration::ZERO);
+            }
+            _ => {}
+        }
     }
 }
 
 /// Calls [`BandwidthDispatcher::register_torrent`] /
 /// [`BandwidthDispatcher::unregister_torrent`] /
 /// [`BandwidthDispatcher::update_torrent_peers`] at the appropriate events.
-///
-/// Port of Java `BandwidthDispatcherNotifier`.
 pub struct BandwidthDispatcherNotifier {
     bandwidth: Arc<BandwidthDispatcher>,
 }
@@ -219,44 +188,45 @@ impl BandwidthDispatcherNotifier {
 }
 
 impl AnnounceResponseHandler for BandwidthDispatcherNotifier {
-    fn on_start_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
+    fn on_announce_result(
+        &self,
+        announcer: &Arc<Announcer>,
+        event: RequestEvent,
+        outcome: &AnnounceOutcome,
+    ) {
         let info_hash = announcer.torrent_info_hash().clone();
-        debug!(info_hash = %info_hash, "register torrent with bandwidth dispatcher");
-        self.bandwidth.register_torrent(info_hash.clone());
-        self.bandwidth.update_torrent_peers(
-            info_hash,
-            result.seeders().max(0) as u32,
-            result.leechers().max(0) as u32,
-        );
-    }
-
-    fn on_regular_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        let info_hash = announcer.torrent_info_hash().clone();
-        debug!(info_hash = %info_hash, "update torrent peers in bandwidth dispatcher");
-        self.bandwidth.update_torrent_peers(
-            info_hash,
-            result.seeders().max(0) as u32,
-            result.leechers().max(0) as u32,
-        );
-    }
-
-    fn on_stop_success(&self, announcer: &Arc<Announcer>, _result: SuccessAnnounceResponse) {
-        let info_hash = announcer.torrent_info_hash().clone();
-        debug!(info_hash = %info_hash, "unregister torrent from bandwidth dispatcher");
-        self.bandwidth.unregister_torrent(&info_hash);
-    }
-
-    fn on_too_many_failed_in_a_row(&self, announcer: &Arc<Announcer>, _err: &TooManyFailuresError) {
-        let info_hash = announcer.torrent_info_hash().clone();
-        debug!(info_hash = %info_hash, "unregister torrent after too many failures");
-        self.bandwidth.unregister_torrent(&info_hash);
+        match (event, outcome) {
+            (RequestEvent::Started, AnnounceOutcome::Success(r)) => {
+                debug!(info_hash = %info_hash, "register torrent with bandwidth dispatcher");
+                self.bandwidth.register_torrent(info_hash.clone());
+                self.bandwidth.update_torrent_peers(
+                    info_hash,
+                    r.seeders().max(0) as u32,
+                    r.leechers().max(0) as u32,
+                );
+            }
+            (RequestEvent::None, AnnounceOutcome::Success(r)) => {
+                debug!(info_hash = %info_hash, "update torrent peers in bandwidth dispatcher");
+                self.bandwidth.update_torrent_peers(
+                    info_hash,
+                    r.seeders().max(0) as u32,
+                    r.leechers().max(0) as u32,
+                );
+            }
+            (RequestEvent::Stopped, AnnounceOutcome::Success(_)) => {
+                debug!(info_hash = %info_hash, "unregister torrent from bandwidth dispatcher");
+                self.bandwidth.unregister_torrent(&info_hash);
+            }
+            (_, AnnounceOutcome::TooManyFailures(_)) => {
+                debug!(info_hash = %info_hash, "unregister torrent after too many failures");
+                self.bandwidth.unregister_torrent(&info_hash);
+            }
+            _ => {}
+        }
     }
 }
 
 /// Bridges the handler chain into the orchestrator's drop/refill logic.
-///
-/// Port of Java `ClientNotifier`. Exposed as a trait so tests can substitute
-/// a spy without building a real `ClientOrchestrator`.
 pub trait ClientNotificationSink: Send + Sync {
     fn on_too_many_failed(&self, info_hash: &InfoHash);
     fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash);
@@ -276,39 +246,43 @@ impl ClientNotifier {
 }
 
 impl AnnounceResponseHandler for ClientNotifier {
-    fn on_start_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        if result.seeders() < 1 || result.leechers() < 1 {
-            self.sink.on_no_more_peers(announcer.torrent_info_hash());
+    fn on_announce_result(
+        &self,
+        announcer: &Arc<Announcer>,
+        event: RequestEvent,
+        outcome: &AnnounceOutcome,
+    ) {
+        match (event, outcome) {
+            (RequestEvent::Started, AnnounceOutcome::Success(r))
+                if r.seeders() < 1 || r.leechers() < 1 =>
+            {
+                self.sink.on_no_more_peers(announcer.torrent_info_hash());
+            }
+            (RequestEvent::None, AnnounceOutcome::Success(r)) => {
+                if r.seeders() < 1 || r.leechers() < 1 {
+                    self.sink.on_no_more_peers(announcer.torrent_info_hash());
+                    return;
+                }
+                if announcer.has_reached_upload_ratio_limit() {
+                    self.sink
+                        .on_upload_ratio_limit_reached(announcer.torrent_info_hash());
+                }
+            }
+            (RequestEvent::Stopped, AnnounceOutcome::Success(_)) => {
+                debug!(info_hash = %announcer.torrent_info_hash(), "torrent has stopped");
+                self.sink
+                    .on_torrent_has_stopped(announcer.torrent_info_hash());
+            }
+            (_, AnnounceOutcome::TooManyFailures(_)) => {
+                debug!(info_hash = %announcer.torrent_info_hash(), "torrent has failed too many times");
+                self.sink.on_too_many_failed(announcer.torrent_info_hash());
+            }
+            _ => {}
         }
-    }
-
-    fn on_regular_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        if result.seeders() < 1 || result.leechers() < 1 {
-            self.sink.on_no_more_peers(announcer.torrent_info_hash());
-            return;
-        }
-        if announcer.has_reached_upload_ratio_limit() {
-            self.sink
-                .on_upload_ratio_limit_reached(announcer.torrent_info_hash());
-        }
-    }
-
-    fn on_stop_success(&self, announcer: &Arc<Announcer>, _result: SuccessAnnounceResponse) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "torrent has stopped");
-        self.sink
-            .on_torrent_has_stopped(announcer.torrent_info_hash());
-    }
-
-    fn on_too_many_failed_in_a_row(&self, announcer: &Arc<Announcer>, _err: &TooManyFailuresError) {
-        debug!(info_hash = %announcer.torrent_info_hash(), "torrent has failed too many times");
-        self.sink.on_too_many_failed(announcer.torrent_info_hash());
     }
 }
 
 /// Fans out visible events to the [`EngineEventSink`] for UI / logging.
-///
-/// Port of Java `AnnounceEventPublisher`. Only emits the subset of events
-/// the UI actually consumes; extend as needed.
 pub struct AnnounceEventPublisher {
     sink: Arc<dyn EngineEventSink>,
 }
@@ -330,78 +304,41 @@ impl AnnounceResponseHandler for AnnounceEventPublisher {
         });
     }
 
-    fn on_start_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        self.sink.publish(EngineEvent::AnnounceSucceeded {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            seeders: result.seeders().max(0) as u32,
-            leechers: result.leechers().max(0) as u32,
-            interval: result.interval().max(0) as u32,
-        });
-    }
-
-    fn on_regular_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        self.sink.publish(EngineEvent::AnnounceSucceeded {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            seeders: result.seeders().max(0) as u32,
-            leechers: result.leechers().max(0) as u32,
-            interval: result.interval().max(0) as u32,
-        });
-    }
-
-    fn on_stop_success(&self, announcer: &Arc<Announcer>, result: SuccessAnnounceResponse) {
-        self.sink.publish(EngineEvent::AnnounceSucceeded {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            seeders: result.seeders().max(0) as u32,
-            leechers: result.leechers().max(0) as u32,
-            interval: result.interval().max(0) as u32,
-        });
-    }
-
-    fn on_start_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
-        self.sink.publish(EngineEvent::AnnounceFailed {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            error: error.to_string(),
-        });
-    }
-
-    fn on_regular_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
-        self.sink.publish(EngineEvent::AnnounceFailed {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            error: error.to_string(),
-        });
-    }
-
-    fn on_stop_fails(&self, announcer: &Arc<Announcer>, error: &AnnouncerError) {
-        self.sink.publish(EngineEvent::AnnounceFailed {
-            info_hash: announcer.torrent_info_hash().clone(),
-            name: announcer.torrent().name.clone(),
-            error: error.to_string(),
-        });
-    }
-
-    fn on_too_many_failed_in_a_row(&self, announcer: &Arc<Announcer>, _err: &TooManyFailuresError) {
-        self.sink
-            .publish(EngineEvent::TooManyAnnouncesFailedInARow {
-                info_hash: announcer.torrent_info_hash().clone(),
-                name: announcer.torrent().name.clone(),
-            });
+    fn on_announce_result(
+        &self,
+        announcer: &Arc<Announcer>,
+        _event: RequestEvent,
+        outcome: &AnnounceOutcome,
+    ) {
+        match outcome {
+            AnnounceOutcome::Success(r) => {
+                self.sink.publish(EngineEvent::AnnounceSucceeded {
+                    info_hash: announcer.torrent_info_hash().clone(),
+                    name: announcer.torrent().name.clone(),
+                    seeders: r.seeders().max(0) as u32,
+                    leechers: r.leechers().max(0) as u32,
+                    interval: r.interval().max(0) as u32,
+                });
+            }
+            AnnounceOutcome::Failure(e) => {
+                self.sink.publish(EngineEvent::AnnounceFailed {
+                    info_hash: announcer.torrent_info_hash().clone(),
+                    name: announcer.torrent().name.clone(),
+                    error: e.to_string(),
+                });
+            }
+            AnnounceOutcome::TooManyFailures(_) => {
+                self.sink
+                    .publish(EngineEvent::TooManyAnnouncesFailedInARow {
+                        info_hash: announcer.torrent_info_hash().clone(),
+                        name: announcer.torrent().name.clone(),
+                    });
+            }
+        }
     }
 }
 
-/// Pokes the [`SeedManager`][crate::seed_manager] merger task whenever an
-/// announcer facade's live fields (`last_known_interval`,
-/// `last_known_seeders` / `leechers`, `consecutive_fails`,
-/// `last_announced_at`) have just moved. The merger rebuilds the whole
-/// snapshot in response — see [`MergerPoke::AnnouncerUpdated`].
-///
-/// Installed as the final handler in the chain so every earlier handler's
-/// bookkeeping (notably [`ClientNotifier`]'s drop decisions) has already
-/// landed before the snapshot is re-merged.
+/// Pokes the merger task whenever announcer state has changed.
 pub struct MergerPokeNotifier {
     poke: mpsc::Sender<MergerPoke>,
 }
@@ -413,32 +350,17 @@ impl MergerPokeNotifier {
     }
 
     fn fire(&self) {
-        // Full queue is safe to drop: the merger coalesces pokes by reading
-        // the latest facade state on the next wake-up.
         let _ = self.poke.try_send(MergerPoke::AnnouncerUpdated);
     }
 }
 
 impl AnnounceResponseHandler for MergerPokeNotifier {
-    fn on_start_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
-        self.fire();
-    }
-    fn on_start_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
-        self.fire();
-    }
-    fn on_regular_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
-        self.fire();
-    }
-    fn on_regular_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
-        self.fire();
-    }
-    fn on_stop_success(&self, _a: &Arc<Announcer>, _r: SuccessAnnounceResponse) {
-        self.fire();
-    }
-    fn on_stop_fails(&self, _a: &Arc<Announcer>, _e: &AnnouncerError) {
-        self.fire();
-    }
-    fn on_too_many_failed_in_a_row(&self, _a: &Arc<Announcer>, _e: &TooManyFailuresError) {
+    fn on_announce_result(
+        &self,
+        _announcer: &Arc<Announcer>,
+        _event: RequestEvent,
+        _outcome: &AnnounceOutcome,
+    ) {
         self.fire();
     }
 }
@@ -468,9 +390,6 @@ mod tests {
 
     #[test]
     fn dispatcher_notifier_clamps_negative_peer_counts() {
-        // Guard against regressing the `result.seeders().max(0)` / `.leechers().max(0)`
-        // clamp when porting the Java version. Nothing to run — compiled
-        // correctness of the field accessors is enough.
         let _ = AnnounceRequest::create_regular(ih(1));
     }
 }

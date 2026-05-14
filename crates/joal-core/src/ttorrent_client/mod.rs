@@ -21,6 +21,6 @@ pub use announcer_factory::AnnouncerFactory;
 pub use client::{ClientError, ClientOrchestrator, ORCHESTRATOR_TICK};
 pub use delay_queue::{DelayQueue, InfoHashAble};
 pub use response_handlers::{
-    AnnounceEventPublisher, AnnounceReEnqueuer, AnnounceResponseHandler,
+    AnnounceEventPublisher, AnnounceOutcome, AnnounceReEnqueuer, AnnounceResponseHandler,
     AnnounceResponseHandlerChain, BandwidthDispatcherNotifier, ClientNotifier, MergerPokeNotifier,
 };
