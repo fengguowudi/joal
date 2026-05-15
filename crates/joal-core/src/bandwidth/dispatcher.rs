@@ -297,6 +297,13 @@ fn on_tick(inner: &Mutex<Inner>, tick_ms: u64) {
         debug!("bandwidth dispatcher refreshed global bandwidth");
     }
     guard.accumulate_uploaded(tick_ms);
+    if let Some(sender) = guard.poke.as_ref() {
+        // try_send: a dropped poke collapses into the next one because
+        // the merger always rebuilds from current state. On a 20-min
+        // boundary tick this is the second send (recompute_speeds
+        // already pushed one); the merger coalesces, so don't dedupe.
+        let _ = sender.try_send(MergerPoke::SpeedRecomputed);
+    }
 }
 
 fn compute_ticks_per_refresh(tick_period: Duration, refresh_interval: Duration) -> u64 {
@@ -496,6 +503,54 @@ mod tests {
                 .iter()
                 .all(|p| matches!(p, MergerPoke::SpeedRecomputed))
         );
+    }
+
+    #[tokio::test]
+    async fn tick_pokes_merger_for_live_uploaded_refresh() {
+        // Default 20-min refresh interval -> 1200 ticks per refresh; three
+        // ticks below cannot cross the boundary, so each poke is from the
+        // post-accumulate path, not the boundary recompute.
+        let d = dispatcher(500_000);
+        let a = hash(1);
+        d.register_torrent(a.clone());
+        d.update_torrent_peers(a.clone(), 10, 10);
+
+        let (tx, mut rx) = mpsc::channel(16);
+        d.set_merger_poke(Some(tx));
+
+        // Drain anything that snuck in between channel attach and now.
+        while rx.try_recv().is_ok() {}
+
+        d.tick_once_for_test();
+        d.tick_once_for_test();
+        d.tick_once_for_test();
+
+        let mut pokes = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            pokes.push(msg);
+        }
+        assert_eq!(pokes.len(), 3, "expected one poke per tick");
+        assert!(
+            pokes
+                .iter()
+                .all(|p| matches!(p, MergerPoke::SpeedRecomputed))
+        );
+        // Sanity: uploaded actually advanced this entire time.
+        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 1_500_000);
+    }
+
+    #[test]
+    fn tick_without_poke_subscriber_does_not_panic() {
+        let d = dispatcher(500_000);
+        let a = hash(1);
+        d.register_torrent(a.clone());
+        d.update_torrent_peers(a.clone(), 10, 10);
+        // No set_merger_poke call: inner.poke stays None.
+
+        d.tick_once_for_test();
+        d.tick_once_for_test();
+
+        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 1_000_000);
     }
 
     #[tokio::test]
