@@ -1,5 +1,7 @@
 # JOAL — Jack of All Trades
 
+[![CI](https://github.com/fengguowudi/joal/actions/workflows/ci.yml/badge.svg)](https://github.com/fengguowudi/joal/actions/workflows/ci.yml)
+
 JOAL 是一个 BitTorrent 做种模拟器。它通过模拟真实 BT 客户端的 announce 行为（peer-id、key、User-Agent、query 格式等），向 tracker 汇报虚拟的上传量，从而在不实际传输数据的情况下维持做种比率。
 
 本项目为 Rust 重写版本，使用 egui 原生桌面 GUI 替代了原 Java + Spring WebSocket 架构。
@@ -50,17 +52,17 @@ cargo build --release
 ```
 
 编译产物位于：
-- Debug: `target/debug/joal-app`（或 `joal-app.exe`）
-- Release: `target/release/joal-app`（或 `joal-app.exe`）
+- Debug: `target/debug/joal-desktop.exe`
+- Release: `target/release/joal-desktop.exe`
 
 ### 运行
 
 ```bash
 # 使用仓库自带的 resources 目录作为配置
-cargo run --release -- --joal-conf ./resources
+cargo run --release -p joal-app -- --joal-conf ./resources
 
 # 或直接运行编译好的二进制
-./target/release/joal-app --joal-conf /path/to/your/joal-conf
+./target/release/joal-desktop --joal-conf /path/to/your/joal-conf
 ```
 
 `--joal-conf` 目录必须包含：
