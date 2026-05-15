@@ -102,7 +102,7 @@ impl Inner {
 pub struct BandwidthDispatcher {
     inner: Arc<Mutex<Inner>>,
     tick_period: Duration,
-    task: Option<JoinHandle<()>>,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl BandwidthDispatcher {
@@ -136,7 +136,7 @@ impl BandwidthDispatcher {
                 poke: None,
             })),
             tick_period,
-            task: None,
+            task: Mutex::new(None),
         }
     }
 
@@ -211,8 +211,9 @@ impl BandwidthDispatcher {
 
     /// Spawn the background scheduler. The task runs until [`Self::stop`] is
     /// called or the dispatcher is dropped.
-    pub fn start(&mut self) -> Result<(), BandwidthError> {
-        if self.task.is_some() {
+    pub fn start(&self) -> Result<(), BandwidthError> {
+        let mut task_slot = self.task.lock().unwrap_or_else(PoisonError::into_inner);
+        if task_slot.is_some() {
             return Err(BandwidthError::AlreadyRunning);
         }
         let inner = Arc::clone(&self.inner);
@@ -230,15 +231,16 @@ impl BandwidthDispatcher {
                 on_tick(&inner, tick_ms);
             }
         });
-        self.task = Some(handle);
+        *task_slot = Some(handle);
         Ok(())
     }
 
-    pub async fn stop(&mut self) -> Result<(), BandwidthError> {
-        let handle = self.task.take().ok_or(BandwidthError::NotRunning)?;
+    pub async fn stop(&self) -> Result<(), BandwidthError> {
+        let handle = {
+            let mut task_slot = self.task.lock().unwrap_or_else(PoisonError::into_inner);
+            task_slot.take().ok_or(BandwidthError::NotRunning)?
+        };
         handle.abort();
-        // JoinError on abort is expected; any other variant means the task
-        // panicked — we surface nothing and return cleanly either way.
         let _ = handle.await;
         Ok(())
     }
@@ -260,16 +262,22 @@ impl BandwidthDispatcher {
 
 impl std::fmt::Debug for BandwidthDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let running = self
+            .task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
         f.debug_struct("BandwidthDispatcher")
             .field("tick_period", &self.tick_period)
-            .field("running", &self.task.is_some())
+            .field("running", &running)
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for BandwidthDispatcher {
     fn drop(&mut self) {
-        if let Some(handle) = self.task.take() {
+        let task = self.task.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(handle) = task {
             handle.abort();
         }
     }
@@ -488,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn double_start_returns_error() {
-        let mut d = dispatcher(1_000);
+        let d = dispatcher(1_000);
         d.start().expect("first start");
         assert!(matches!(d.start(), Err(BandwidthError::AlreadyRunning)));
         d.stop().await.expect("stop");
@@ -496,16 +504,17 @@ mod tests {
 
     #[tokio::test]
     async fn stop_without_start_returns_error() {
-        let mut d = dispatcher(1_000);
+        let d = dispatcher(1_000);
         assert!(matches!(d.stop().await, Err(BandwidthError::NotRunning)));
     }
 
     #[tokio::test]
     async fn start_and_stop_completes_cleanly() {
-        let mut d = dispatcher(100_000);
+        let d = dispatcher(100_000);
         d.start().expect("start");
         d.stop().await.expect("stop");
-        assert!(d.task.is_none());
+        let task = d.task.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(task.is_none());
     }
 
     #[test]

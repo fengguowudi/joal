@@ -10,7 +10,7 @@
 //!    drains it every [`ORCHESTRATOR_TICK`] and dispatches ready entries to
 //!    the [`AnnouncerExecutor`].
 //! 3. Owns the `currently_seeding_announcers` list, exposed to UI consumers
-//!    via read-only [`AnnouncerFacade`] references.
+//!    via read-only [`Announcer::facade_snapshot`] calls.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use crate::announcer::{AnnounceRequest, Announcer, AnnouncerFacade};
+use crate::announcer::{AnnounceRequest, Announcer};
 use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::config::AppConfiguration;
@@ -31,10 +31,10 @@ use crate::snapshot::MergerPoke;
 use crate::torrent::{
     InfoHash, MockedTorrent, NoMoreTorrentsError, TorrentFileChangeAware, TorrentFileProvider,
 };
-use crate::ttorrent_client::announcer_executor::{AnnouncerExecutor, OrchestratorControl};
-use crate::ttorrent_client::announcer_factory::AnnouncerFactory;
-use crate::ttorrent_client::delay_queue::DelayQueue;
-use crate::ttorrent_client::response_handlers::{
+use crate::orchestrator::announcer_executor::{AnnouncerExecutor, OrchestratorControl};
+use crate::orchestrator::announcer_factory::AnnouncerFactory;
+use crate::orchestrator::delay_queue::DelayQueue;
+use crate::orchestrator::response_handlers::{
     AnnounceEventPublisher, AnnounceReEnqueuer, AnnounceResponseHandlerChain,
     BandwidthDispatcherNotifier, ClientNotifier, MergerPokeNotifier,
 };
@@ -103,22 +103,17 @@ impl ClientOrchestrator {
         });
         let _ = shared.weak_self.set(Arc::downgrade(&shared));
 
-        // Build the response-handler chain: order matters — publisher first
-        // for UX parity with Java.
-        let mut chain = AnnounceResponseHandlerChain::new();
-        chain.append(Arc::new(AnnounceEventPublisher::new(Arc::clone(events))));
-        chain.append(Arc::new(AnnounceReEnqueuer::new(Arc::clone(&delay_queue))));
-        chain.append(Arc::new(BandwidthDispatcherNotifier::new(bandwidth)));
-        // ClientNotifier comes last among the behaviour-bearing handlers: its
-        // callbacks must see the fully-wired state.
+        // Build the response-handler chain: field order in the struct
+        // defines execution order — publisher first for UX parity with Java.
         let control: Arc<dyn OrchestratorControl> = Arc::clone(&shared) as _;
-        chain.append(Arc::new(ClientNotifier::new(Arc::clone(&control))));
-        // The merger poke is strictly a snapshot trigger — it runs after every
-        // other handler so the facade fields it triggers on already reflect
-        // the new announce's side-effects.
-        if let Some(poke) = merger_poke {
-            chain.append(Arc::new(MergerPokeNotifier::new(poke)));
-        }
+        let merger_poke_handler = merger_poke.map(MergerPokeNotifier::new);
+        let chain = AnnounceResponseHandlerChain::new(
+            AnnounceEventPublisher::new(Arc::clone(events)),
+            AnnounceReEnqueuer::new(Arc::clone(&delay_queue)),
+            BandwidthDispatcherNotifier::new(bandwidth),
+            ClientNotifier::new(Arc::clone(&control)),
+            merger_poke_handler,
+        );
 
         let callback = chain.into_callback();
         let executor = Arc::new(AnnouncerExecutor::new(callback, control));
@@ -244,16 +239,6 @@ impl ClientOrchestrator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         guard.clone()
-    }
-
-    /// Read-only view of live announcers typed as [`AnnouncerFacade`]
-    /// handles, matching Java `getCurrentlySeedingAnnouncers()`.
-    #[must_use]
-    pub fn seeding_announcer_facades(&self) -> Vec<Arc<dyn AnnouncerFacade>> {
-        self.announcers_snapshot()
-            .into_iter()
-            .map(|a| a as Arc<dyn AnnouncerFacade>)
-            .collect()
     }
 
     /// Access the delay queue. Mostly for tests.

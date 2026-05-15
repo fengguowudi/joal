@@ -15,7 +15,7 @@
 //! | [`request`] | `AnnounceRequest` + `AnnounceDataAccessor` |
 //! | [`response`] | `SuccessAnnounceResponse` + `TrackerResponseHandler` |
 //! | [`tracker`] | `TrackerClient` + `TrackerClientUriProvider` |
-//! | [`state`] | `Announcer` + `AnnouncerFacade` |
+//! | [`state`] | `Announcer` + `AnnouncerSnapshot` |
 //!
 //! ## Byte-level compatibility invariants
 //!
@@ -43,5 +43,5 @@ pub mod tracker;
 pub use error::{AnnouncerError, NoMoreUriAvailableError, TooManyFailuresError};
 pub use request::{AnnounceDataAccessor, AnnounceRequest};
 pub use response::SuccessAnnounceResponse;
-pub use state::{Announcer, AnnouncerFacade, MAX_CONSECUTIVE_FAILURES};
+pub use state::{Announcer, AnnouncerSnapshot, MAX_CONSECUTIVE_FAILURES};
 pub use tracker::{TrackerClient, TrackerClientUriProvider};

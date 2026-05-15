@@ -1,4 +1,4 @@
-//! Stateful per-torrent announcer + the read-only facade shared with the UI.
+//! Stateful per-torrent announcer + the read-only snapshot shared with the UI.
 //!
 //! Port of Java `org.araymond.joal.core.ttorrent.client.announcer.Announcer`
 //! and `AnnouncerFacade`. One instance per torrent, holds the tracker
@@ -24,21 +24,20 @@ use super::tracker::TrackerClient;
 /// check in `Announcer.announce(...)`.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// Read-only view of an [`Announcer`]. Mirror of Java `AnnouncerFacade`.
+/// Read-only snapshot of an [`Announcer`]'s observable state.
 ///
-/// The UI layer and the CoreEventListener chain consume this; they must not
-/// be able to reach into the announcer's failure counter or tracker client
-/// directly.
-pub trait AnnouncerFacade: Send + Sync {
-    fn last_known_interval(&self) -> i32;
-    fn consecutive_fails(&self) -> u32;
-    fn last_known_leechers(&self) -> Option<i32>;
-    fn last_known_seeders(&self) -> Option<i32>;
-    /// Wall-clock instant of the most recent announce attempt, if any.
-    fn last_announced_at(&self) -> Option<Instant>;
-    fn torrent_name(&self) -> &str;
-    fn torrent_size(&self) -> u64;
-    fn torrent_info_hash(&self) -> &InfoHash;
+/// Returned by [`Announcer::facade_snapshot`] — one lock acquisition yields
+/// all fields the UI / merger task needs.
+#[derive(Clone, Debug)]
+pub struct AnnouncerSnapshot {
+    pub last_known_interval: i32,
+    pub consecutive_fails: u32,
+    pub last_known_leechers: Option<i32>,
+    pub last_known_seeders: Option<i32>,
+    pub last_announced_at: Option<Instant>,
+    pub torrent_name: String,
+    pub torrent_size: u64,
+    pub torrent_info_hash: InfoHash,
 }
 
 /// Mutable per-torrent state kept behind a [`Mutex`]. Split out of the main
@@ -228,52 +227,55 @@ impl Announcer {
     }
 }
 
-impl AnnouncerFacade for Announcer {
-    fn last_known_interval(&self) -> i32 {
+impl Announcer {
+    #[must_use]
+    pub fn last_known_interval(&self) -> i32 {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_known_interval
     }
 
-    fn consecutive_fails(&self) -> u32 {
+    #[must_use]
+    pub fn consecutive_fails(&self) -> u32 {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .consecutive_fails
     }
 
-    fn last_known_leechers(&self) -> Option<i32> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_known_leechers
-    }
-
-    fn last_known_seeders(&self) -> Option<i32> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_known_seeders
-    }
-
-    fn last_announced_at(&self) -> Option<Instant> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_announced_at
-    }
-
-    fn torrent_name(&self) -> &str {
+    #[must_use]
+    pub fn torrent_name(&self) -> &str {
         &self.torrent.name
     }
 
-    fn torrent_size(&self) -> u64 {
+    #[must_use]
+    pub fn torrent_size(&self) -> u64 {
         self.torrent.total_size
     }
 
-    fn torrent_info_hash(&self) -> &InfoHash {
+    #[must_use]
+    pub fn torrent_info_hash(&self) -> &InfoHash {
         &self.torrent.info_hash
+    }
+
+    /// Single-lock snapshot of all UI-visible fields.
+    #[must_use]
+    pub fn facade_snapshot(&self) -> AnnouncerSnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        AnnouncerSnapshot {
+            last_known_interval: state.last_known_interval,
+            consecutive_fails: state.consecutive_fails,
+            last_known_leechers: state.last_known_leechers,
+            last_known_seeders: state.last_known_seeders,
+            last_announced_at: state.last_announced_at,
+            torrent_name: self.torrent.name.clone(),
+            torrent_size: self.torrent.total_size,
+            torrent_info_hash: self.torrent.info_hash.clone(),
+        }
     }
 }
 

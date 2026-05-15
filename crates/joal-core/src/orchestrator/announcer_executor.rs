@@ -21,7 +21,7 @@ use crate::announcer::{
 };
 use crate::client::RequestEvent;
 use crate::torrent::InfoHash;
-use crate::ttorrent_client::response_handlers::AnnounceOutcome;
+use crate::orchestrator::response_handlers::AnnounceOutcome;
 
 /// Matches Java's `awaitTermination(10, SECONDS)` for outstanding announces.
 pub const AWAIT_TIMEOUT: Duration = Duration::from_secs(10);

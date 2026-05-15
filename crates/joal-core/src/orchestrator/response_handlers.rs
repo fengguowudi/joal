@@ -2,18 +2,18 @@
 //!
 //! Port of Java
 //! `org.araymond.joal.core.ttorrent.client.announcer.response.*`. The Rust
-//! chain is a `Vec<Arc<dyn AnnounceResponseHandler>>`; handlers are invoked
-//! in registration order and must never panic (the executor task will be
+//! chain is a typed struct with fields in execution order; handlers are
+//! invoked sequentially and must never panic (the executor task will be
 //! torn down if they do).
 //!
 //! Concrete handlers:
 //!
 //! - [`AnnounceReEnqueuer`] — feeds the next request back into the
-//!   [`DelayQueue`][crate::ttorrent_client::DelayQueue]. Success uses the
+//!   [`DelayQueue`][crate::orchestrator::DelayQueue]. Success uses the
 //!   server-supplied interval; failure uses `announcer.last_known_interval`.
 //! - [`BandwidthDispatcherNotifier`] — register / unregister / update-peers
 //!   calls against the [`BandwidthDispatcher`][crate::bandwidth::BandwidthDispatcher].
-//! - [`ClientNotifier`] — callbacks into the [`ClientOrchestrator`][crate::ttorrent_client::ClientOrchestrator]
+//! - [`ClientNotifier`] — callbacks into the [`ClientOrchestrator`][crate::orchestrator::ClientOrchestrator]
 //!   for drop / refill decisions.
 //! - [`AnnounceEventPublisher`] — fans out public-facing events on the
 //!   [`EngineEventSink`][crate::events::EngineEventSink].
@@ -25,15 +25,15 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::announcer::{
-    AnnounceRequest, Announcer, AnnouncerError, AnnouncerFacade, SuccessAnnounceResponse,
+    AnnounceRequest, Announcer, AnnouncerError, SuccessAnnounceResponse,
     TooManyFailuresError,
 };
 use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::events::{EngineEvent, EngineEventSink};
 use crate::snapshot::MergerPoke;
-use crate::ttorrent_client::announcer_executor::{AnnounceResponseCallback, OrchestratorControl};
-use crate::ttorrent_client::delay_queue::DelayQueue;
+use crate::orchestrator::announcer_executor::{AnnounceResponseCallback, OrchestratorControl};
+use crate::orchestrator::delay_queue::DelayQueue;
 
 /// Outcome of an announce round-trip.
 #[derive(Debug)]
@@ -43,34 +43,36 @@ pub enum AnnounceOutcome {
     TooManyFailures(TooManyFailuresError),
 }
 
-/// Per-event handler. Simplified from the Java visitor-style 8-method trait.
-pub trait AnnounceResponseHandler: Send + Sync {
-    fn on_will_announce(&self, _announcer: &Arc<Announcer>, _event: RequestEvent) {}
-    fn on_announce_result(
-        &self,
-        _announcer: &Arc<Announcer>,
-        _event: RequestEvent,
-        _outcome: &AnnounceOutcome,
-    ) {
-    }
-}
-
-/// Fan-out wrapper. Implements [`AnnounceResponseCallback`] so the executor
-/// can call a single instance and get the chain dispatched behind it.
+/// Typed handler pipeline. Field order is execution order:
+/// 1. event_publisher — UX parity with Java (publish first)
+/// 2. re_enqueuer — schedule next announce
+/// 3. bandwidth_notifier — register/unregister/update peers
+/// 4. client_notifier — orchestrator drop/refill decisions
+/// 5. merger_poke — snapshot trigger (runs last so facade fields are up-to-date)
 pub struct AnnounceResponseHandlerChain {
-    handlers: Vec<Arc<dyn AnnounceResponseHandler>>,
+    event_publisher: AnnounceEventPublisher,
+    re_enqueuer: AnnounceReEnqueuer,
+    bandwidth_notifier: BandwidthDispatcherNotifier,
+    client_notifier: ClientNotifier,
+    merger_poke: Option<MergerPokeNotifier>,
 }
 
 impl AnnounceResponseHandlerChain {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(
+        event_publisher: AnnounceEventPublisher,
+        re_enqueuer: AnnounceReEnqueuer,
+        bandwidth_notifier: BandwidthDispatcherNotifier,
+        client_notifier: ClientNotifier,
+        merger_poke: Option<MergerPokeNotifier>,
+    ) -> Self {
         Self {
-            handlers: Vec::new(),
+            event_publisher,
+            re_enqueuer,
+            bandwidth_notifier,
+            client_notifier,
+            merger_poke,
         }
-    }
-
-    pub fn append(&mut self, handler: Arc<dyn AnnounceResponseHandler>) {
-        self.handlers.push(handler);
     }
 
     #[must_use]
@@ -79,25 +81,18 @@ impl AnnounceResponseHandlerChain {
     }
 }
 
-impl Default for AnnounceResponseHandlerChain {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for AnnounceResponseHandlerChain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnnounceResponseHandlerChain")
-            .field("handlers", &self.handlers.len())
+            .field("merger_poke", &self.merger_poke.is_some())
             .finish()
     }
 }
 
 impl AnnounceResponseCallback for AnnounceResponseHandlerChain {
     fn on_will_announce(&self, event: RequestEvent, announcer: &Arc<Announcer>) {
-        for h in &self.handlers {
-            h.on_will_announce(announcer, event);
-        }
+        self.event_publisher.on_will_announce(announcer, event);
     }
 
     fn on_announce_result(
@@ -106,8 +101,16 @@ impl AnnounceResponseCallback for AnnounceResponseHandlerChain {
         announcer: &Arc<Announcer>,
         outcome: &AnnounceOutcome,
     ) {
-        for h in &self.handlers {
-            h.on_announce_result(announcer, event, outcome);
+        self.event_publisher
+            .on_announce_result(announcer, event, outcome);
+        self.re_enqueuer
+            .on_announce_result(announcer, event, outcome);
+        self.bandwidth_notifier
+            .on_announce_result(announcer, event, outcome);
+        self.client_notifier
+            .on_announce_result(announcer, event, outcome);
+        if let Some(ref poke) = self.merger_poke {
+            poke.on_announce_result(announcer, event, outcome);
         }
     }
 }
@@ -127,9 +130,7 @@ impl AnnounceReEnqueuer {
     pub fn new(delay_queue: Arc<DelayQueue<AnnounceRequest>>) -> Self {
         Self { delay_queue }
     }
-}
 
-impl AnnounceResponseHandler for AnnounceReEnqueuer {
     fn on_announce_result(
         &self,
         announcer: &Arc<Announcer>,
@@ -184,9 +185,7 @@ impl BandwidthDispatcherNotifier {
     pub fn new(bandwidth: Arc<BandwidthDispatcher>) -> Self {
         Self { bandwidth }
     }
-}
 
-impl AnnounceResponseHandler for BandwidthDispatcherNotifier {
     fn on_announce_result(
         &self,
         announcer: &Arc<Announcer>,
@@ -235,9 +234,7 @@ impl ClientNotifier {
     pub fn new(control: Arc<dyn OrchestratorControl>) -> Self {
         Self { control }
     }
-}
 
-impl AnnounceResponseHandler for ClientNotifier {
     fn on_announce_result(
         &self,
         announcer: &Arc<Announcer>,
@@ -284,9 +281,7 @@ impl AnnounceEventPublisher {
     pub fn new(sink: Arc<dyn EngineEventSink>) -> Self {
         Self { sink }
     }
-}
 
-impl AnnounceResponseHandler for AnnounceEventPublisher {
     fn on_will_announce(&self, announcer: &Arc<Announcer>, _event: RequestEvent) {
         let tracker_url = announcer.tracker_client().uri_provider().current();
         self.sink.publish(EngineEvent::AnnounceStarted {
@@ -344,9 +339,7 @@ impl MergerPokeNotifier {
     fn fire(&self) {
         let _ = self.poke.try_send(MergerPoke::AnnouncerUpdated);
     }
-}
 
-impl AnnounceResponseHandler for MergerPokeNotifier {
     fn on_announce_result(
         &self,
         _announcer: &Arc<Announcer>,

@@ -30,12 +30,12 @@
 //!    torrent list (add / remove / too-many-failures).
 //! 2. An mpsc `MergerPoke` mailbox — fed by [`BandwidthDispatcher`] when it
 //!    recomputes speeds, and by the announcer handler chain
-//!    ([`MergerPokeNotifier`][crate::ttorrent_client::MergerPokeNotifier])
+//!    ([`MergerPokeNotifier`][crate::orchestrator::MergerPokeNotifier])
 //!    after every announce round-trip.
 //! 3. A shutdown oneshot — closed by [`SeedManager::stop`].
 //!
 //! On every wake-up it rebuilds the snapshot from scratch by joining the
-//! orchestrator's [`AnnouncerFacade`] list with
+//! orchestrator's announcer list with
 //! `BandwidthDispatcher::get_seed_stat_for_torrent` + `speed_map`. Rebuilding
 //! is O(torrents) and cheaper than the alternative (diffing event payloads)
 //! for the 10–100 torrent case joal targets.
@@ -56,7 +56,7 @@ use crate::config::{self, JoalFolders};
 use crate::events::{BroadcastSink, EngineEvent, EngineEventSink};
 use crate::snapshot::{EngineSnapshot, MergerPoke, TorrentStatus};
 use crate::torrent::TorrentFileProvider;
-use crate::ttorrent_client::{AnnouncerFactory, ClientOrchestrator};
+use crate::orchestrator::{AnnouncerFactory, ClientOrchestrator};
 
 // Re-export for convenience — the UI needs these to call config helpers.
 pub use crate::config::AppConfiguration;
@@ -157,12 +157,12 @@ impl SeedManager {
 
         let (poke_tx, poke_rx) = mpsc::channel::<MergerPoke>(MERGER_POKE_CAPACITY);
 
-        let mut bandwidth =
+        let bandwidth =
             BandwidthDispatcher::new(BANDWIDTH_TICK_PERIOD, RandomSpeedProvider::new(&app_config));
+        let bandwidth = Arc::new(bandwidth);
         bandwidth
             .start()
             .context("failed to start bandwidth dispatcher")?;
-        let bandwidth = Arc::new(bandwidth);
         bandwidth.set_merger_poke(Some(poke_tx.clone()));
 
         let torrent_provider = TorrentFileProvider::new(&folders)
@@ -467,28 +467,28 @@ fn publish_snapshot(deps: &MergerDeps, snapshot_tx: &watch::Sender<EngineSnapsho
 
 fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
     let speeds = deps.bandwidth.speed_map();
-    let facades = deps.orchestrator.seeding_announcer_facades();
+    let announcers = deps.orchestrator.announcers_snapshot();
 
-    let mut torrents = Vec::with_capacity(facades.len());
+    let mut torrents = Vec::with_capacity(announcers.len());
     let mut global_bps: u64 = 0;
-    for facade in facades {
-        let info_hash = facade.torrent_info_hash().clone();
+    for announcer in &announcers {
+        let snap = announcer.facade_snapshot();
         let current_speed_bps = speeds
-            .get(&info_hash)
+            .get(&snap.torrent_info_hash)
             .map_or(0, crate::bandwidth::Speed::bytes_per_second);
         global_bps = global_bps.saturating_add(current_speed_bps);
-        let stats = deps.bandwidth.get_seed_stat_for_torrent(&info_hash);
+        let stats = deps.bandwidth.get_seed_stat_for_torrent(&snap.torrent_info_hash);
         torrents.push(TorrentStatus {
-            info_hash,
-            name: facade.torrent_name().to_owned(),
-            total_size: facade.torrent_size(),
+            info_hash: snap.torrent_info_hash,
+            name: snap.torrent_name,
+            total_size: snap.torrent_size,
             uploaded_bytes: stats.uploaded(),
             current_speed_bps,
-            last_known_interval: to_u32(facade.last_known_interval()),
-            last_known_seeders: facade.last_known_seeders().and_then(to_u32),
-            last_known_leechers: facade.last_known_leechers().and_then(to_u32),
-            consecutive_fails: facade.consecutive_fails(),
-            last_announced_at: facade.last_announced_at(),
+            last_known_interval: to_u32(snap.last_known_interval),
+            last_known_seeders: snap.last_known_seeders.and_then(to_u32),
+            last_known_leechers: snap.last_known_leechers.and_then(to_u32),
+            consecutive_fails: snap.consecutive_fails,
+            last_announced_at: snap.last_announced_at,
         });
     }
 

@@ -10,18 +10,12 @@ pub mod event;
 pub mod generator;
 pub mod provider;
 pub mod runtime;
-pub mod utils;
+pub(crate) mod utils;
 
 pub use bit_torrent_client::BitTorrentClient;
 pub use config::{BitTorrentClientConfig, HttpHeader};
 pub use error::ClientError;
 pub use event::RequestEvent;
-pub use generator::{
-    DigitRangeTransformedToHexWithoutLeadingZeroKeyAlgorithm, HashKeyAlgorithm,
-    HashNoLeadingZeroKeyAlgorithm, KeyAlgorithmDef, KeyConfig, KeyGenerator, NumwantProvider,
-    PEER_ID_LENGTH, PeerIdAlgorithmDef, PeerIdConfig, PeerIdGenerator,
-    RandomPoolWithChecksumPeerIdAlgorithm, RegexKeyAlgorithm, RegexPeerIdAlgorithm, UrlEncoder,
-};
 pub use provider::BitTorrentClientProvider;
 pub use runtime::ConnectionHandler;
 pub use runtime::{fetch_public_ip, spawn_ip_refresher, IP_REFRESH_INTERVAL};

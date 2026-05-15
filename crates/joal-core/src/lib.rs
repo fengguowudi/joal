@@ -29,4 +29,4 @@ pub mod events;
 pub mod seed_manager;
 pub mod snapshot;
 pub mod torrent;
-pub mod ttorrent_client;
+pub mod orchestrator;
