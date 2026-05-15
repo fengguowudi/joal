@@ -385,6 +385,7 @@ impl eframe::App for JoalApp {
             let available = ui.available_height();
             let table_height = (available * 0.5).max(200.0);
             let chart_height = (available * 0.25).max(100.0);
+            let log_height = (available * 0.25).max(120.0);
 
             ui.allocate_ui(egui::vec2(ui.available_width(), table_height), |ui| {
                 torrent_table::show(ui, &self.current_snapshot, &mut self.pending_delete, t);
@@ -398,13 +399,15 @@ impl eframe::App for JoalApp {
 
             ui.separator();
 
-            log_panel::show(
-                ui,
-                &self.log_buffer,
-                &mut self.log_auto_scroll,
-                self.started_at,
-                t,
-            );
+            ui.allocate_ui(egui::vec2(ui.available_width(), log_height), |ui| {
+                log_panel::show(
+                    ui,
+                    &self.log_buffer,
+                    &mut self.log_auto_scroll,
+                    self.started_at,
+                    t,
+                );
+            });
         });
     }
 }
