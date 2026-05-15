@@ -383,9 +383,9 @@ impl eframe::App for JoalApp {
         // Central content
         egui::CentralPanel::default_margins().show_inside(ui, |ui| {
             let available = ui.available_height();
-            let table_height = (available * 0.5).max(200.0);
-            let chart_height = (available * 0.25).max(100.0);
-            let log_height = (available * 0.25).max(120.0);
+            let table_height = (available * 0.70).max(200.0);
+            let chart_height = (available * 0.20).max(100.0);
+            let log_height = (available * 0.10).max(80.0);
 
             ui.allocate_ui(egui::vec2(ui.available_width(), table_height), |ui| {
                 torrent_table::show(ui, &self.current_snapshot, &mut self.pending_delete, t);

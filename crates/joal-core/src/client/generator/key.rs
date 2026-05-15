@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::error::ClientError;
 use crate::client::utils::Casing;
 
-use super::common::{compile_rand_regex, string_from_ascii_regex_bytes};
+use super::common::compile_rand_regex;
 use super::refresh_policy::{GenerateValue, RefreshPolicy};
 
 #[cfg(test)]
@@ -16,13 +16,20 @@ use super::common::{default_shared_state, lock_state};
 
 const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Algorithm used to generate a raw key string before `keyCase` is applied.
+/// Algorithm used to generate a raw key byte sequence before `keyCase` is applied.
+///
+/// All bundled key algorithms produce ASCII output, but we return `Vec<u8>` for
+/// consistency with the peer-id side of the trait family.
 pub trait KeyAlgorithm {
-    fn generate(&self) -> Result<String, ClientError>;
+    fn generate(&self) -> Result<Vec<u8>, ClientError>;
 }
 
-fn generate_key(algorithm: &KeyAlgorithmDef, key_case: Casing) -> Result<String, ClientError> {
-    Ok(key_case.to_case(&algorithm.generate()?))
+fn generate_key(algorithm: &KeyAlgorithmDef, key_case: Casing) -> Result<Vec<u8>, ClientError> {
+    let raw = algorithm.generate()?;
+    // All shipped key algorithms emit ASCII, so the round-trip is lossless.
+    let raw_str = std::str::from_utf8(&raw)
+        .map_err(|e| ClientError::NonUtf8Output(format!("key algorithm: {e}")))?;
+    Ok(key_case.to_case(raw_str).into_bytes())
 }
 
 /// `type = "HASH"`
@@ -44,9 +51,9 @@ impl HashKeyAlgorithm {
 }
 
 impl KeyAlgorithm for HashKeyAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
-        Ok(self.generate_with_rng(&mut rng))
+        Ok(self.generate_with_rng(&mut rng).into_bytes())
     }
 }
 
@@ -72,9 +79,9 @@ impl HashNoLeadingZeroKeyAlgorithm {
 }
 
 impl KeyAlgorithm for HashNoLeadingZeroKeyAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
-        Ok(self.generate_with_rng(&mut rng))
+        Ok(self.generate_with_rng(&mut rng).into_bytes())
     }
 }
 
@@ -116,9 +123,9 @@ impl DigitRangeTransformedToHexWithoutLeadingZeroKeyAlgorithm {
 }
 
 impl KeyAlgorithm for DigitRangeTransformedToHexWithoutLeadingZeroKeyAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
-        Ok(self.generate_with_rng(&mut rng))
+        Ok(self.generate_with_rng(&mut rng).into_bytes())
     }
 }
 
@@ -147,15 +154,15 @@ impl RegexKeyAlgorithm {
         Ok(())
     }
 
-    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<String, ClientError> {
+    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<Vec<u8>, ClientError> {
         let generator = compile_rand_regex(&self.pattern)?;
         let bytes: Vec<u8> = rng.sample(&generator);
-        string_from_ascii_regex_bytes(bytes)
+        Ok(bytes)
     }
 }
 
 impl KeyAlgorithm for RegexKeyAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
         self.generate_with_rng(&mut rng)
     }
@@ -185,7 +192,7 @@ impl KeyAlgorithmDef {
         }
     }
 
-    pub fn generate(&self) -> Result<String, ClientError> {
+    pub fn generate(&self) -> Result<Vec<u8>, ClientError> {
         self.validate()?;
         match self {
             KeyAlgorithmDef::HASH(inner) => inner.generate(),
@@ -214,7 +221,7 @@ impl KeyConfig {
 }
 
 impl GenerateValue for KeyConfig {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         generate_key(&self.algorithm, self.key_case)
     }
 
@@ -307,9 +314,10 @@ mod tests {
         let algo = RegexKeyAlgorithm::new(r"[A-Z0-9]{8}").unwrap();
         let mut rng = StdRng::seed_from_u64(0x1357_2468);
         let got = algo.generate_with_rng(&mut rng).unwrap();
+        let got_str = std::str::from_utf8(&got).unwrap();
         let re = Regex::new(r"\A[A-Z0-9]{8}\z").unwrap();
-        assert!(re.is_match(&got));
-        assert_eq!(got, "5V6INXKR");
+        assert!(re.is_match(got_str));
+        assert_eq!(&got[..], b"5V6INXKR" as &[u8]);
     }
 
     #[test]
@@ -322,8 +330,9 @@ mod tests {
         };
         let got = generator.get(&info_hash(1), RequestEvent::None).unwrap();
         assert_eq!(got.len(), 4);
-        assert!(got.chars().all(|ch| ch.is_ascii_hexdigit()));
-        assert_eq!(got, got.to_ascii_lowercase());
+        let got_str = std::str::from_utf8(&got).unwrap();
+        assert!(got_str.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(got_str, got_str.to_ascii_lowercase());
     }
 
     #[test]

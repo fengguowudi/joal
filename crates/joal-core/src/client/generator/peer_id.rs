@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::error::ClientError;
 
-use super::common::{compile_rand_regex, string_from_ascii_regex_bytes};
+use super::common::compile_rand_regex;
 use super::refresh_policy::{GenerateValue, RefreshPolicy};
 
 #[cfg(test)]
@@ -16,13 +16,13 @@ use super::common::{default_shared_state, lock_state};
 /// Java constant `PeerIdGenerator.PEER_ID_LENGTH`.
 pub const PEER_ID_LENGTH: usize = 20;
 
-/// Algorithm used to generate a raw peer-id string.
+/// Algorithm used to generate a raw peer-id byte sequence.
 pub trait PeerIdAlgorithm {
     /// Generate a peer-id using a deterministic or random source.
-    fn generate(&self) -> Result<String, ClientError>;
+    fn generate(&self) -> Result<Vec<u8>, ClientError>;
 }
 
-fn generate_peer_id(algorithm: &PeerIdAlgorithmDef) -> Result<String, ClientError> {
+fn generate_peer_id(algorithm: &PeerIdAlgorithmDef) -> Result<Vec<u8>, ClientError> {
     let peer_id = algorithm.generate()?;
     if peer_id.len() != PEER_ID_LENGTH {
         return Err(ClientError::Integrity(format!(
@@ -53,15 +53,15 @@ impl RegexPeerIdAlgorithm {
         Ok(())
     }
 
-    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<String, ClientError> {
+    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<Vec<u8>, ClientError> {
         let generator = compile_rand_regex(&self.pattern)?;
         let bytes: Vec<u8> = rng.sample(&generator);
-        string_from_ascii_regex_bytes(bytes)
+        Ok(bytes)
     }
 }
 
 impl PeerIdAlgorithm for RegexPeerIdAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
         self.generate_with_rng(&mut rng)
     }
@@ -115,7 +115,7 @@ impl RandomPoolWithChecksumPeerIdAlgorithm {
         Ok(())
     }
 
-    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> String {
+    fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Vec<u8> {
         let suffix_length = PEER_ID_LENGTH - self.prefix.len();
         let random_len = suffix_length.saturating_sub(1);
         let mut random_bytes = vec![0_u8; random_len];
@@ -139,12 +139,12 @@ impl RandomPoolWithChecksumPeerIdAlgorithm {
         };
         suffix.push(pool[checksum_idx]);
 
-        format!("{}{}", self.prefix, suffix)
+        format!("{}{}", self.prefix, suffix).into_bytes()
     }
 }
 
 impl PeerIdAlgorithm for RandomPoolWithChecksumPeerIdAlgorithm {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         let mut rng = rand::thread_rng();
         Ok(self.generate_with_rng(&mut rng))
     }
@@ -167,7 +167,7 @@ impl PeerIdAlgorithmDef {
         }
     }
 
-    pub fn generate(&self) -> Result<String, ClientError> {
+    pub fn generate(&self) -> Result<Vec<u8>, ClientError> {
         self.validate()?;
         match self {
             PeerIdAlgorithmDef::REGEX(inner) => inner.generate(),
@@ -192,7 +192,7 @@ impl PeerIdConfig {
 }
 
 impl GenerateValue for PeerIdConfig {
-    fn generate(&self) -> Result<String, ClientError> {
+    fn generate(&self) -> Result<Vec<u8>, ClientError> {
         generate_peer_id(&self.algorithm)
     }
 
@@ -240,10 +240,11 @@ mod tests {
         let algo = RegexPeerIdAlgorithm::new(r"-qB4500-[A-Za-z0-9_~\(\)\!\.\*-]{12}").unwrap();
         let mut rng = StdRng::seed_from_u64(0x5eed_1234);
         let got = algo.generate_with_rng(&mut rng).unwrap();
-        let re = Regex::new(r"\A-qB4500-[A-Za-z0-9_~\(\)!\.\*-]{12}\z").unwrap();
-        assert!(re.is_match(&got));
         assert_eq!(got.len(), PEER_ID_LENGTH);
-        assert_eq!(got, "-qB4500-KXzcDRnO4BIm");
+        let got_str = std::str::from_utf8(&got).unwrap();
+        let re = Regex::new(r"\A-qB4500-[A-Za-z0-9_~\(\)!\.\*-]{12}\z").unwrap();
+        assert!(re.is_match(got_str));
+        assert_eq!(&got[..], b"-qB4500-KXzcDRnO4BIm" as &[u8]);
     }
 
     #[test]
@@ -257,9 +258,10 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0x1234_5678);
         let got = algo.generate_with_rng(&mut rng);
         assert_eq!(got.len(), PEER_ID_LENGTH);
-        assert_eq!(got, "-TR4050-b2G3T3P7OsGW");
+        assert_eq!(&got[..], b"-TR4050-b2G3T3P7OsGW" as &[u8]);
 
-        let suffix = &got[algo.prefix.len()..];
+        let got_str = std::str::from_utf8(&got).unwrap();
+        let suffix = &got_str[algo.prefix.len()..];
         let pool: Vec<char> = algo.characters_pool.chars().collect();
         let mut total = 0usize;
         for ch in suffix.chars() {
@@ -407,5 +409,63 @@ mod tests {
             .get(&info_hash(1), RequestEvent::None)
             .unwrap_err();
         assert!(matches!(error, ClientError::Integrity(_)));
+    }
+
+    /// Regression for rtorrent-0.9.6_0.13.6.client (and any other `.client`
+    /// file whose peer-id pattern embeds high-byte chars).
+    ///
+    /// Pattern is the literal one shipped in the JSON file — the JSON decoder
+    /// turns `` / `ÿ` into the corresponding `char`s, so the
+    /// `String` we hand to `compile_rand_regex` already contains them as
+    /// non-ASCII codepoints.
+    #[test]
+    fn rtorrent_high_byte_pattern_always_produces_20_bytes() {
+        let mut pattern = String::from("-lt0D60-[");
+        pattern.push('\u{01}');
+        pattern.push('-');
+        pattern.push('\u{ff}');
+        pattern.push_str("]{12}");
+        let algo = RegexPeerIdAlgorithm::new(&pattern).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0xdead_beef);
+        for i in 0..10_000 {
+            let got = algo.generate_with_rng(&mut rng).unwrap();
+            assert_eq!(
+                got.len(),
+                PEER_ID_LENGTH,
+                "iter {i}: pattern {pattern:?} produced {} bytes",
+                got.len()
+            );
+            assert!(got.starts_with(b"-lt0D60-"));
+        }
+    }
+
+    /// Regression for bittorrent-7.10.3_44429.client.
+    #[test]
+    fn bittorrent_high_byte_pattern_always_produces_20_bytes() {
+        let mut pattern = String::from("-BT7a3S-(");
+        pattern.push('\u{8d}');
+        pattern.push_str(")(");
+        pattern.push('\u{ad}');
+        pattern.push_str(")[");
+        pattern.push('\u{01}');
+        pattern.push('-');
+        pattern.push('\u{ff}');
+        pattern.push_str("]{10}");
+        let algo = RegexPeerIdAlgorithm::new(&pattern).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0xcafe_f00d);
+        for i in 0..10_000 {
+            let got = algo.generate_with_rng(&mut rng).unwrap();
+            assert_eq!(
+                got.len(),
+                PEER_ID_LENGTH,
+                "iter {i}: pattern {pattern:?} produced {} bytes",
+                got.len()
+            );
+            assert!(got.starts_with(b"-BT7a3S-"));
+            assert_eq!(got[8], 0x8d, "byte 8 must be the literal 0x8d");
+            assert_eq!(got[9], 0xad, "byte 9 must be the literal 0xad");
+        }
     }
 }

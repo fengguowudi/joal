@@ -101,12 +101,15 @@ impl BitTorrentClient {
     }
 
     /// Peer-id for the given `(info_hash, event)` pair, applying the
-    /// configured refresh policy.
+    /// configured refresh policy. The returned bytes are the raw wire
+    /// representation — for high-byte regex patterns (rtorrent / bittorrent
+    /// uTorrent clients) some bytes are non-ASCII and must be URL-encoded
+    /// before going on the announce URL.
     pub fn peer_id(
         &self,
         info_hash: &InfoHash,
         event: RequestEvent,
-    ) -> Result<String, ClientError> {
+    ) -> Result<Vec<u8>, ClientError> {
         self.peer_id_generator.get(info_hash, event)
     }
 
@@ -115,7 +118,7 @@ impl BitTorrentClient {
         &self,
         info_hash: &InfoHash,
         event: RequestEvent,
-    ) -> Result<Option<String>, ClientError> {
+    ) -> Result<Option<Vec<u8>>, ClientError> {
         match &self.key_generator {
             Some(generator) => generator.get(info_hash, event).map(Some),
             None => Ok(None),
@@ -153,9 +156,19 @@ impl BitTorrentClient {
 
         let peer_id_raw = self.peer_id(info_hash, event)?;
         let peer_id = if self.peer_id_generator.config().should_url_encode() {
-            self.url_encoder.encode(&peer_id_raw)?
+            self.url_encoder.encode_bytes(&peer_id_raw)?
         } else {
-            peer_id_raw
+            // `should_url_encode = false` is only safe for ASCII-only peer-id
+            // patterns; the bundled clients honor this, but a future config
+            // could violate the invariant — error out cleanly rather than
+            // silently sending non-ASCII bytes on the wire.
+            if !peer_id_raw.is_ascii() {
+                return Err(ClientError::Integrity(
+                    "peer_id contains non-ASCII bytes but shouldUrlEncode is false".to_owned(),
+                ));
+            }
+            String::from_utf8(peer_id_raw)
+                .expect("non-ASCII bytes rejected above; remaining bytes are valid UTF-8")
         };
         q = replace_literal(&q, &PEER_ID_PTRN, &peer_id);
 
@@ -186,7 +199,7 @@ impl BitTorrentClient {
                         .to_owned(),
                 )
             })?;
-            let encoded = self.url_encoder.encode(&key)?;
+            let encoded = self.url_encoder.encode_bytes(&key)?;
             q = replace_literal(&q, &KEY_PTRN, &encoded);
         }
 

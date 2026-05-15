@@ -14,7 +14,7 @@ use super::common::{AccessAwareEntry, TimedState, default_shared_state, lock_sta
 pub trait GenerateValue:
     Clone + Debug + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>
 {
-    fn generate(&self) -> Result<String, ClientError>;
+    fn generate(&self) -> Result<Vec<u8>, ClientError>;
     fn validate(&self) -> Result<(), ClientError>;
 }
 
@@ -52,8 +52,8 @@ pub enum RefreshPolicy<C: GenerateValue> {
     TORRENT_VOLATILE {
         #[serde(flatten)]
         config: C,
-        #[serde(skip, default = "default_shared_state::<HashMap<InfoHash, String>>")]
-        state: Arc<Mutex<HashMap<InfoHash, String>>>,
+        #[serde(skip, default = "default_shared_state::<HashMap<InfoHash, Vec<u8>>>")]
+        state: Arc<Mutex<HashMap<InfoHash, Vec<u8>>>>,
     },
     TORRENT_PERSISTENT {
         #[serde(flatten)]
@@ -175,7 +175,7 @@ impl<C: GenerateValue> RefreshPolicy<C> {
         Ok(())
     }
 
-    pub fn get(&self, info_hash: &InfoHash, event: RequestEvent) -> Result<String, ClientError> {
+    pub fn get(&self, info_hash: &InfoHash, event: RequestEvent) -> Result<Vec<u8>, ClientError> {
         self.validate()?;
         match self {
             Self::NEVER { config, state, .. } => {
