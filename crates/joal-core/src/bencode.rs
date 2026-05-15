@@ -115,8 +115,20 @@ impl Value {
 }
 
 /// Decode a complete bencode payload. Rejects trailing garbage.
+/// Enforces strictly ascending dictionary key order per BEP-3.
 pub fn parse(input: &[u8]) -> Result<Value, BencodeError> {
-    let mut parser = Parser::new(input);
+    let mut parser = Parser::new(input, true);
+    let value = parser.parse_value()?;
+    if parser.pos != input.len() {
+        return Err(BencodeError::TrailingBytes { offset: parser.pos });
+    }
+    Ok(value)
+}
+
+/// Decode a complete bencode payload without enforcing dictionary key ordering.
+/// Use for tracker responses which may not comply with BEP-3 key ordering.
+pub fn parse_lenient(input: &[u8]) -> Result<Value, BencodeError> {
+    let mut parser = Parser::new(input, false);
     let value = parser.parse_value()?;
     if parser.pos != input.len() {
         return Err(BencodeError::TrailingBytes { offset: parser.pos });
@@ -130,7 +142,7 @@ pub fn parse(input: &[u8]) -> Result<Value, BencodeError> {
 /// The SHA-1 of this slice is the `info_hash` required by BEP-3 and by every
 /// tracker announce request.
 pub fn extract_info_dict_bytes(torrent: &[u8]) -> Result<&[u8], BencodeError> {
-    let mut parser = Parser::new(torrent);
+    let mut parser = Parser::new(torrent, true);
 
     // Top level must be a dict.
     if parser.peek()? != b'd' {
@@ -167,11 +179,16 @@ pub fn extract_info(torrent: &[u8]) -> Result<(&[u8], Value), BencodeError> {
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
+    strict_order: bool,
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0 }
+    fn new(input: &'a [u8], strict_order: bool) -> Self {
+        Self {
+            input,
+            pos: 0,
+            strict_order,
+        }
     }
 
     fn peek(&self) -> Result<u8, BencodeError> {
@@ -327,7 +344,8 @@ impl<'a> Parser<'a> {
                 return Err(BencodeError::DictKeyNotString { offset: key_offset });
             }
             let key = self.parse_byte_string()?;
-            if let Some(prev) = &last_key
+            if self.strict_order
+                && let Some(prev) = &last_key
                 && key.as_slice() <= prev.as_slice()
             {
                 return Err(BencodeError::DictUnordered { offset: key_offset });
@@ -409,6 +427,19 @@ mod tests {
             parse(b"d4:spam4:eggs3:cow3:mooe"),
             Err(BencodeError::DictUnordered { .. })
         ));
+    }
+
+    #[test]
+    fn parse_lenient_accepts_unordered_dict_keys() {
+        let v = parse_lenient(b"d4:spam4:eggs3:cow3:mooe").unwrap();
+        assert_eq!(
+            v.get("cow").and_then(Value::as_bytes),
+            Some(b"moo".as_slice())
+        );
+        assert_eq!(
+            v.get("spam").and_then(Value::as_bytes),
+            Some(b"eggs".as_slice())
+        );
     }
 
     #[test]

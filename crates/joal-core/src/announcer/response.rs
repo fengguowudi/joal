@@ -68,7 +68,7 @@ impl SuccessAnnounceResponse {
     /// Same as [`Self::parse`] but attaches `tracker_uri` to
     /// [`AnnouncerError::TrackerReported`] for log clarity.
     pub fn parse_with_uri(bytes: &[u8], tracker_uri: &str) -> Result<Self, AnnouncerError> {
-        let value = bencode::parse(bytes)?;
+        let value = bencode::parse_lenient(bytes)?;
 
         if let Some(reason) = value.get("failure reason").and_then(Value::as_bytes) {
             let reason = String::from_utf8_lossy(reason).into_owned();
