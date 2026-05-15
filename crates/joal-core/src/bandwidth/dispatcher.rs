@@ -276,7 +276,11 @@ impl std::fmt::Debug for BandwidthDispatcher {
 
 impl Drop for BandwidthDispatcher {
     fn drop(&mut self) {
-        let task = self.task.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let task = self
+            .task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some(handle) = task {
             handle.abort();
         }

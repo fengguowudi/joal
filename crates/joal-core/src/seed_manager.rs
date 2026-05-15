@@ -51,12 +51,14 @@ use tracing::{debug, info, warn};
 
 use crate::announcer::AnnounceDataAccessor;
 use crate::bandwidth::{BandwidthDispatcher, RandomSpeedProvider};
-use crate::client::{BitTorrentClient, BitTorrentClientProvider, ConnectionHandler, fetch_public_ip};
+use crate::client::{
+    BitTorrentClient, BitTorrentClientProvider, ConnectionHandler, fetch_public_ip,
+};
 use crate::config::{self, JoalFolders};
 use crate::events::{BroadcastSink, EngineEvent, EngineEventSink};
+use crate::orchestrator::{AnnouncerFactory, ClientOrchestrator};
 use crate::snapshot::{EngineSnapshot, MergerPoke, TorrentStatus};
 use crate::torrent::TorrentFileProvider;
-use crate::orchestrator::{AnnouncerFactory, ClientOrchestrator};
 
 // Re-export for convenience — the UI needs these to call config helpers.
 pub use crate::config::AppConfiguration;
@@ -183,9 +185,8 @@ impl SeedManager {
             config: app_config.clone(),
         });
 
-        let mut connection =
-            ConnectionHandler::with_ephemeral_port()
-                .unwrap_or_else(|_| ConnectionHandler::with_port_only(51413));
+        let mut connection = ConnectionHandler::with_ephemeral_port()
+            .unwrap_or_else(|_| ConnectionHandler::with_port_only(51413));
 
         let proxy_url = app_config.proxy_url();
         let ip = options.ip_resolver.resolve(proxy_url.as_deref()).await;
@@ -210,16 +211,14 @@ impl SeedManager {
             Arc::clone(&bandwidth),
             Arc::clone(&connection),
         );
-        let mut http_builder = reqwest::Client::builder()
-            .timeout(TRACKER_HTTP_TIMEOUT);
+        let mut http_builder = reqwest::Client::builder().timeout(TRACKER_HTTP_TIMEOUT);
         if let Some(proxy_url) = app_config.proxy_url() {
             info!(
                 target: "joal_core::seed_manager",
                 proxy = %proxy_url,
                 "HTTP client configured with proxy",
             );
-            let proxy = reqwest::Proxy::all(&proxy_url)
-                .context("failed to parse proxy URL")?;
+            let proxy = reqwest::Proxy::all(&proxy_url).context("failed to parse proxy URL")?;
             http_builder = http_builder.proxy(proxy);
         }
         let http = http_builder
@@ -477,7 +476,9 @@ fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
             .get(&snap.torrent_info_hash)
             .map_or(0, crate::bandwidth::Speed::bytes_per_second);
         global_bps = global_bps.saturating_add(current_speed_bps);
-        let stats = deps.bandwidth.get_seed_stat_for_torrent(&snap.torrent_info_hash);
+        let stats = deps
+            .bandwidth
+            .get_seed_stat_for_torrent(&snap.torrent_info_hash);
         torrents.push(TorrentStatus {
             info_hash: snap.torrent_info_hash,
             name: snap.torrent_name,

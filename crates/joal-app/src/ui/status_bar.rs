@@ -12,11 +12,8 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
         }
         ui.separator();
         ui.label(
-            egui::RichText::new(format!(
-                "{}: {}",
-                t.client, snapshot.active_client_filename
-            ))
-            .strong(),
+            egui::RichText::new(format!("{}: {}", t.client, snapshot.active_client_filename))
+                .strong(),
         );
         ui.separator();
         ui.label(format!(

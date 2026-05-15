@@ -13,8 +13,8 @@ use joal_core::bandwidth::{BandwidthDispatcher, RandomSpeedProvider};
 use joal_core::client::{BitTorrentClient, BitTorrentClientConfig, ConnectionHandler};
 use joal_core::config::{AppConfiguration, JoalFolders};
 use joal_core::events::NoopSink;
-use joal_core::torrent::TorrentFileProvider;
 use joal_core::orchestrator::{AnnouncerFactory, ClientOrchestrator};
+use joal_core::torrent::TorrentFileProvider;
 mod common;
 use common::sample_client_file;
 

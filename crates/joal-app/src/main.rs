@@ -204,9 +204,7 @@ async fn command_handler(
                     sm.delete_torrent(&info_hash).await;
                 } else {
                     let _ = resp_tx
-                        .send(EngineResponse::Error(
-                            "Engine is not running".to_owned(),
-                        ))
+                        .send(EngineResponse::Error("Engine is not running".to_owned()))
                         .await;
                 }
             }

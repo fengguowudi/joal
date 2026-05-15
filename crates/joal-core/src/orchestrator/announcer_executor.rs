@@ -16,12 +16,10 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use crate::announcer::{
-    AnnounceRequest, Announcer, AnnouncerError,
-};
+use crate::announcer::{AnnounceRequest, Announcer, AnnouncerError};
 use crate::client::RequestEvent;
-use crate::torrent::InfoHash;
 use crate::orchestrator::response_handlers::AnnounceOutcome;
+use crate::torrent::InfoHash;
 
 /// Matches Java's `awaitTermination(10, SECONDS)` for outstanding announces.
 pub const AWAIT_TIMEOUT: Duration = Duration::from_secs(10);

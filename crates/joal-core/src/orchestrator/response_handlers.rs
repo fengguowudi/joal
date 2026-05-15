@@ -25,15 +25,14 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::announcer::{
-    AnnounceRequest, Announcer, AnnouncerError, SuccessAnnounceResponse,
-    TooManyFailuresError,
+    AnnounceRequest, Announcer, AnnouncerError, SuccessAnnounceResponse, TooManyFailuresError,
 };
 use crate::bandwidth::BandwidthDispatcher;
 use crate::client::RequestEvent;
 use crate::events::{EngineEvent, EngineEventSink};
-use crate::snapshot::MergerPoke;
 use crate::orchestrator::announcer_executor::{AnnounceResponseCallback, OrchestratorControl};
 use crate::orchestrator::delay_queue::DelayQueue;
+use crate::snapshot::MergerPoke;
 
 /// Outcome of an announce round-trip.
 #[derive(Debug)]
@@ -264,7 +263,8 @@ impl ClientNotifier {
             }
             (_, AnnounceOutcome::TooManyFailures(_)) => {
                 debug!(info_hash = %announcer.torrent_info_hash(), "torrent has failed too many times");
-                self.control.on_too_many_failed(announcer.torrent_info_hash());
+                self.control
+                    .on_too_many_failed(announcer.torrent_info_hash());
             }
             _ => {}
         }

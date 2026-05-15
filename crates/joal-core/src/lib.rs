@@ -26,7 +26,7 @@ pub mod bencode;
 pub mod client;
 pub mod config;
 pub mod events;
+pub mod orchestrator;
 pub mod seed_manager;
 pub mod snapshot;
 pub mod torrent;
-pub mod orchestrator;
