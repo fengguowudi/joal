@@ -50,7 +50,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::announcer::AnnounceDataAccessor;
-use crate::bandwidth::{BandwidthDispatcher, RandomSpeedProvider};
+use crate::bandwidth::{BandwidthDispatcher, DownloadSpeedProvider, RandomSpeedProvider};
 use crate::client::{
     BitTorrentClient, BitTorrentClientProvider, ConnectionHandler, fetch_public_ip,
 };
@@ -123,6 +123,11 @@ pub struct SeedManager {
     orchestrator: Arc<ClientOrchestrator>,
     torrent_provider: Arc<TorrentFileProvider>,
     bandwidth: Arc<BandwidthDispatcher>,
+    merger_poke_tx: mpsc::Sender<MergerPoke>,
+    /// Persistent UI flags ([initial completed] and friends). Held here so
+    /// the EngineCommand handler (PR3) can mutate them without re-reading
+    /// from disk; the field is read from the merger deps via `Arc::clone`.
+    state_store: Arc<crate::torrent::TorrentStateStore>,
     merger: Option<JoinHandle<()>>,
     merger_shutdown: Option<oneshot::Sender<()>>,
     active_client_filename: String,
@@ -159,8 +164,11 @@ impl SeedManager {
 
         let (poke_tx, poke_rx) = mpsc::channel::<MergerPoke>(MERGER_POKE_CAPACITY);
 
-        let bandwidth =
-            BandwidthDispatcher::new(BANDWIDTH_TICK_PERIOD, RandomSpeedProvider::new(&app_config));
+        let bandwidth = BandwidthDispatcher::new(
+            BANDWIDTH_TICK_PERIOD,
+            RandomSpeedProvider::new(&app_config),
+            DownloadSpeedProvider::new(&app_config),
+        );
         let bandwidth = Arc::new(bandwidth);
         bandwidth
             .start()
@@ -227,6 +235,7 @@ impl SeedManager {
         let factory = AnnouncerFactory::new(data_accessor, http, app_config.upload_ratio_target);
 
         let client_name = derive_client_name(&client);
+        let state_store = crate::torrent::TorrentStateStore::load(&folders).await;
         let orchestrator = ClientOrchestrator::new(
             app_config,
             Arc::clone(&torrent_provider),
@@ -234,6 +243,7 @@ impl SeedManager {
             factory,
             &events_trait,
             Some(poke_tx.clone()),
+            Arc::clone(&state_store),
         );
         orchestrator
             .start()
@@ -256,6 +266,7 @@ impl SeedManager {
             MergerDeps {
                 orchestrator: Arc::clone(&orchestrator),
                 bandwidth: Arc::clone(&bandwidth),
+                state_store: Arc::clone(&state_store),
                 active_client_filename: active_client_filename.clone(),
             },
             events.subscribe(),
@@ -270,6 +281,8 @@ impl SeedManager {
             orchestrator,
             torrent_provider,
             bandwidth,
+            merger_poke_tx: poke_tx,
+            state_store,
             merger: Some(merger_handle),
             merger_shutdown: Some(shutdown_tx),
             active_client_filename,
@@ -311,11 +324,54 @@ impl SeedManager {
         &self.folders
     }
 
+    /// Read-only access to the persistent UI flag store.
+    #[must_use]
+    pub fn state_store(&self) -> &Arc<crate::torrent::TorrentStateStore> {
+        &self.state_store
+    }
+
+    /// Pull the next regular announce for every live torrent forward to now.
+    pub fn announce_all_now(&self) {
+        if self
+            .merger_poke_tx
+            .try_send(MergerPoke::ImmediateAnnounceAll)
+            .is_err()
+        {
+            self.orchestrator.announce_all_now();
+        }
+    }
+
+    /// Persist and apply the UI's "initial completed" checkbox.
+    pub async fn set_torrent_initial_completed(
+        &self,
+        info_hash: &crate::torrent::InfoHash,
+        completed: bool,
+    ) -> std::result::Result<(), crate::torrent::StateStoreError> {
+        self.state_store
+            .set_initial_completed(info_hash, completed)
+            .await?;
+        let flipped_to_done = self.bandwidth.force_initial_completed(info_hash, completed);
+        if completed
+            && flipped_to_done
+            && self
+                .merger_poke_tx
+                .try_send(MergerPoke::TorrentCompleted(info_hash.clone()))
+                .is_err()
+        {
+            self.orchestrator.mark_completed_pending(info_hash);
+        }
+        Ok(())
+    }
+
     /// Move a torrent to the archive folder by info-hash.
-    pub async fn delete_torrent(&self, info_hash: &crate::torrent::InfoHash) {
+    pub async fn delete_torrent(
+        &self,
+        info_hash: &crate::torrent::InfoHash,
+    ) -> std::result::Result<(), crate::torrent::StateStoreError> {
         self.torrent_provider
             .move_to_archive_folder(info_hash)
             .await;
+        self.state_store.forget(info_hash).await
     }
 
     /// Tear down every spawned task in reverse boot order.
@@ -394,6 +450,7 @@ fn derive_client_name(client: &BitTorrentClient) -> String {
 struct MergerDeps {
     orchestrator: Arc<ClientOrchestrator>,
     bandwidth: Arc<BandwidthDispatcher>,
+    state_store: Arc<crate::torrent::TorrentStateStore>,
     active_client_filename: String,
 }
 
@@ -415,14 +472,22 @@ fn spawn_merger(
                     debug!(target: "joal_core::seed_manager::merger", "shutdown received");
                     break;
                 }
-                poke = poke_rx.recv() => {
-                    if poke.is_some() {
+                poke = poke_rx.recv() => match poke {
+                    Some(MergerPoke::SpeedRecomputed | MergerPoke::AnnouncerUpdated) => {
                         publish_snapshot(&deps, &snapshot_tx);
-                    } else {
+                    }
+                    Some(MergerPoke::TorrentCompleted(info_hash)) => {
+                        deps.orchestrator.mark_completed_pending(&info_hash);
+                        publish_snapshot(&deps, &snapshot_tx);
+                    }
+                    Some(MergerPoke::ImmediateAnnounceAll) => {
+                        deps.orchestrator.announce_all_now();
+                    }
+                    None => {
                         debug!(target: "joal_core::seed_manager::merger", "poke channel closed");
                         break;
                     }
-                }
+                },
                 evt = events_rx.recv() => match evt {
                     Ok(event) if affects_snapshot(&event) => {
                         publish_snapshot(&deps, &snapshot_tx);
@@ -466,25 +531,36 @@ fn publish_snapshot(deps: &MergerDeps, snapshot_tx: &watch::Sender<EngineSnapsho
 
 fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
     let speeds = deps.bandwidth.speed_map();
+    let download_speeds = deps.bandwidth.download_speed_map();
     let announcers = deps.orchestrator.announcers_snapshot();
 
     let mut torrents = Vec::with_capacity(announcers.len());
     let mut global_bps: u64 = 0;
+    let mut global_dl_bps: u64 = 0;
     for announcer in &announcers {
         let snap = announcer.facade_snapshot();
         let current_speed_bps = speeds
             .get(&snap.torrent_info_hash)
             .map_or(0, crate::bandwidth::Speed::bytes_per_second);
+        let current_download_speed_bps = download_speeds
+            .get(&snap.torrent_info_hash)
+            .map_or(0, crate::bandwidth::Speed::bytes_per_second);
         global_bps = global_bps.saturating_add(current_speed_bps);
+        global_dl_bps = global_dl_bps.saturating_add(current_download_speed_bps);
         let stats = deps
             .bandwidth
             .get_seed_stat_for_torrent(&snap.torrent_info_hash);
+        let initial_completed = deps.state_store.is_initial_completed(&snap.torrent_info_hash);
         torrents.push(TorrentStatus {
             info_hash: snap.torrent_info_hash,
             name: snap.torrent_name,
             total_size: snap.torrent_size,
             uploaded_bytes: stats.uploaded(),
+            downloaded_bytes: stats.downloaded(),
+            left_bytes: stats.left(),
             current_speed_bps,
+            current_download_speed_bps,
+            initial_completed,
             last_known_interval: to_u32(snap.last_known_interval),
             last_known_seeders: snap.last_known_seeders.and_then(to_u32),
             last_known_leechers: snap.last_known_leechers.and_then(to_u32),
@@ -496,6 +572,7 @@ fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
     EngineSnapshot {
         active_client_filename: deps.active_client_filename.clone(),
         global_upload_speed_bps: global_bps,
+        global_download_speed_bps: global_dl_bps,
         torrents,
     }
 }

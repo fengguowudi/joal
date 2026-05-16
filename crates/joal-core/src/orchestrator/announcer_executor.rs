@@ -79,11 +79,18 @@ impl AnnouncerExecutor {
     #[allow(clippy::needless_pass_by_value)]
     pub fn execute(&self, request: AnnounceRequest) {
         let info_hash = request.info_hash().clone();
-        let event = request.event();
+        let mut event = request.event();
         let Some(announcer) = self.control.resolve_announcer(&info_hash) else {
             debug!(info_hash = %info_hash, "execute: announcer not resolvable, skipping");
             return;
         };
+        // Sticky `pending_completed` swap: if the simulated download crossed
+        // total_size between the previous announce and now, the merger has
+        // flipped the bit on the announcer. Promote a regular `None`
+        // announce to `Completed` exactly once (the bit is consumed).
+        if matches!(event, RequestEvent::None) && announcer.take_pending_completed() {
+            event = RequestEvent::Completed;
+        }
         let callback = Arc::clone(&self.callback);
         let announcer_task = Arc::clone(&announcer);
         let running = Arc::clone(&self.running);

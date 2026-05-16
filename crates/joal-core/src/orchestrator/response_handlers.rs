@@ -177,12 +177,19 @@ impl AnnounceReEnqueuer {
 /// [`BandwidthDispatcher::update_torrent_peers`] at the appropriate events.
 pub struct BandwidthDispatcherNotifier {
     bandwidth: Arc<BandwidthDispatcher>,
+    state_store: Arc<crate::torrent::TorrentStateStore>,
 }
 
 impl BandwidthDispatcherNotifier {
     #[must_use]
-    pub fn new(bandwidth: Arc<BandwidthDispatcher>) -> Self {
-        Self { bandwidth }
+    pub fn new(
+        bandwidth: Arc<BandwidthDispatcher>,
+        state_store: Arc<crate::torrent::TorrentStateStore>,
+    ) -> Self {
+        Self {
+            bandwidth,
+            state_store,
+        }
     }
 
     fn on_announce_result(
@@ -195,7 +202,10 @@ impl BandwidthDispatcherNotifier {
         match (event, outcome) {
             (RequestEvent::Started, AnnounceOutcome::Success(r)) => {
                 debug!(info_hash = %info_hash, "register torrent with bandwidth dispatcher");
-                self.bandwidth.register_torrent(info_hash.clone());
+                let total_size = announcer.torrent_size();
+                let initial_completed = self.state_store.is_initial_completed(&info_hash);
+                self.bandwidth
+                    .register_torrent(info_hash.clone(), total_size, initial_completed);
                 self.bandwidth.update_torrent_peers(
                     info_hash,
                     r.seeders().max(0) as u32,

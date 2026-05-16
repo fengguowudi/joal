@@ -36,6 +36,10 @@ pub struct EngineSnapshot {
     /// a status HUD doesn't have to re-sum the list every frame.
     pub global_upload_speed_bps: u64,
 
+    /// Sum of per-torrent `current_download_speed_bps`. Always 0 when the
+    /// download faker is disabled (`min/maxDownloadRate == 0`).
+    pub global_download_speed_bps: u64,
+
     /// One entry per live announcer, ordered as returned by the orchestrator
     /// (insertion order).
     pub torrents: Vec<TorrentStatus>,
@@ -51,8 +55,22 @@ pub struct TorrentStatus {
     /// Accumulated tracker-visible `uploaded` bytes — from
     /// `BandwidthDispatcher::get_seed_stat_for_torrent`.
     pub uploaded_bytes: u64,
-    /// Latest per-torrent allocation from the bandwidth dispatcher.
+    /// Accumulated simulated `downloaded` bytes (capped at `total_size`).
+    /// Stays at `0` when the download faker is disabled or the torrent was
+    /// marked "initial completed" started — see [`Self::initial_completed`].
+    pub downloaded_bytes: u64,
+    /// `total_size - downloaded_bytes`, kept in lock-step by the bandwidth
+    /// dispatcher.
+    pub left_bytes: u64,
+    /// Latest per-torrent allocation from the bandwidth dispatcher (upload).
     pub current_speed_bps: u64,
+    /// Latest per-torrent allocation from the *download* faker. `0` once the
+    /// torrent is fully "downloaded".
+    pub current_download_speed_bps: u64,
+    /// Persistent UI flag: user asked this torrent to start as completed.
+    /// Echoed in the snapshot so the table checkbox stays in sync after a
+    /// restart.
+    pub initial_completed: bool,
 
     /// Tracker-reported `interval` seconds from the most recent announce.
     /// `None` before the first successful announce.
@@ -89,4 +107,13 @@ pub enum MergerPoke {
     SpeedRecomputed,
     /// An announcer updated its facade after an announce round-trip.
     AnnouncerUpdated,
+    /// A torrent's simulated download just reached `total_size`. The merger
+    /// flips the announcer's `pending_completed` sticky bit so the very next
+    /// announce reports `event=completed`.
+    TorrentCompleted(InfoHash),
+    /// User asked the engine to fire an immediate announce on every active
+    /// torrent (the "Announce all now" top-bar button). The merger pushes
+    /// every announcer's next due time to "now" via the orchestrator's
+    /// delay queue.
+    ImmediateAnnounceAll,
 }

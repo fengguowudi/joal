@@ -21,8 +21,10 @@ use tokio::io;
 
 use crate::bencode::{self, BencodeError, Value};
 
+pub mod state;
 pub mod watcher;
 
+pub use state::{StateStoreError, TorrentFlags, TorrentStateStore};
 pub use watcher::{NoMoreTorrentsError, TorrentFileChangeAware, TorrentFileProvider};
 
 /// The 20-byte SHA-1 of a torrent's `info` dictionary (BEP-3 `info_hash`).

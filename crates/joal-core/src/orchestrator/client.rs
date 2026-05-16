@@ -88,6 +88,7 @@ impl ClientOrchestrator {
         announcer_factory: AnnouncerFactory,
         events: &Arc<dyn EngineEventSink>,
         merger_poke: Option<mpsc::Sender<MergerPoke>>,
+        state_store: Arc<crate::torrent::TorrentStateStore>,
     ) -> Arc<Self> {
         let delay_queue = Arc::new(DelayQueue::<AnnounceRequest>::new());
         let shared = Arc::new(SharedState {
@@ -110,7 +111,7 @@ impl ClientOrchestrator {
         let chain = AnnounceResponseHandlerChain::new(
             AnnounceEventPublisher::new(Arc::clone(events)),
             AnnounceReEnqueuer::new(Arc::clone(&delay_queue)),
-            BandwidthDispatcherNotifier::new(bandwidth),
+            BandwidthDispatcherNotifier::new(bandwidth, state_store),
             ClientNotifier::new(Arc::clone(&control)),
             merger_poke_handler,
         );
@@ -251,6 +252,37 @@ impl ClientOrchestrator {
     #[must_use]
     pub fn executor(&self) -> &Arc<AnnouncerExecutor> {
         &self.executor
+    }
+
+    /// Mark one live announcer so its next regular announce is promoted to
+    /// `event=completed`.
+    pub fn mark_completed_pending(&self, info_hash: &InfoHash) -> bool {
+        let guard = self
+            .shared
+            .announcers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(announcer) = guard.iter().find(|a| a.torrent_info_hash() == info_hash) else {
+            return false;
+        };
+        announcer.mark_completed_pending();
+        true
+    }
+
+    /// Pull every live announcer's next regular announce forward to "now".
+    ///
+    /// The executor still handles de-duplication and in-flight cancellation;
+    /// this method only updates the delay queue.
+    pub fn announce_all_now(&self) {
+        if self.shared.is_stopping() {
+            return;
+        }
+        for announcer in self.announcers_snapshot() {
+            self.delay_queue.add_or_replace(
+                AnnounceRequest::create_regular(announcer.torrent_info_hash().clone()),
+                Duration::ZERO,
+            );
+        }
     }
 }
 

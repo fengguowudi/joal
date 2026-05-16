@@ -93,6 +93,8 @@ async fn orchestrator_starts_and_stops_cleanly() {
     let app_config = AppConfiguration {
         min_upload_rate: 0,
         max_upload_rate: 0,
+        min_download_rate: 0,
+        max_download_rate: 0,
         simultaneous_seed: 1,
         client: "x.client".into(),
         keep_torrent_with_zero_leechers: true,
@@ -103,6 +105,7 @@ async fn orchestrator_starts_and_stops_cleanly() {
     let bandwidth = Arc::new(BandwidthDispatcher::new(
         Duration::from_secs(1),
         RandomSpeedProvider::new(&app_config),
+        joal_core::bandwidth::DownloadSpeedProvider::new(&app_config),
     ));
 
     let data_accessor =
@@ -119,6 +122,7 @@ async fn orchestrator_starts_and_stops_cleanly() {
 
     // ── Orchestrator.
     let events: Arc<dyn joal_core::events::EngineEventSink> = Arc::new(NoopSink);
+    let state_store = joal_core::torrent::TorrentStateStore::load(&folders).await;
     let orchestrator = ClientOrchestrator::new(
         app_config,
         Arc::clone(&provider),
@@ -126,6 +130,7 @@ async fn orchestrator_starts_and_stops_cleanly() {
         factory,
         &events,
         None,
+        state_store,
     );
     orchestrator.start().await.unwrap();
 

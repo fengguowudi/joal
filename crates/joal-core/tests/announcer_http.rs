@@ -87,6 +87,8 @@ fn default_accessor() -> AnnounceDataAccessor {
     let cfg = AppConfiguration {
         min_upload_rate: 0,
         max_upload_rate: 0,
+        min_download_rate: 0,
+        max_download_rate: 0,
         simultaneous_seed: 1,
         client: "sample.client".into(),
         keep_torrent_with_zero_leechers: true,
@@ -97,8 +99,9 @@ fn default_accessor() -> AnnounceDataAccessor {
     let dispatcher = Arc::new(BandwidthDispatcher::new(
         Duration::from_millis(100),
         RandomSpeedProvider::new(&cfg),
+        joal_core::bandwidth::DownloadSpeedProvider::new(&cfg),
     ));
-    dispatcher.register_torrent(sample_info_hash());
+    dispatcher.register_torrent(sample_info_hash(), 0, false);
     let client_cfg = BitTorrentClientConfig::try_from(sample_client_file()).unwrap();
     let client = Arc::new(BitTorrentClient::new(client_cfg).unwrap());
     AnnounceDataAccessor::new(

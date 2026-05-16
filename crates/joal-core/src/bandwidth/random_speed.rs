@@ -86,6 +86,66 @@ impl RandomSpeedProvider {
     }
 }
 
+/// Same shape as [`RandomSpeedProvider`] but driven by `min/maxDownloadRate`.
+///
+/// Kept as a sibling type rather than a generic so call sites read clearly
+/// (`download.current_speed()` vs. `upload.current_speed()`) and so the
+/// common case — download faker disabled (0/0) — short-circuits to a fixed
+/// `0` with no allocation.
+#[derive(Debug)]
+pub struct DownloadSpeedProvider {
+    min_kib_per_sec: u64,
+    max_kib_per_sec: u64,
+    current_speed_bytes_per_sec: u64,
+    source: Box<dyn RandomSpeedSource>,
+}
+
+impl DownloadSpeedProvider {
+    #[must_use]
+    pub fn new(config: &AppConfiguration) -> Self {
+        Self::with_source(config, Box::new(ThreadRngSource))
+    }
+
+    #[must_use]
+    pub fn with_source(config: &AppConfiguration, source: Box<dyn RandomSpeedSource>) -> Self {
+        let mut this = Self {
+            min_kib_per_sec: config.min_download_rate,
+            max_kib_per_sec: config.max_download_rate,
+            current_speed_bytes_per_sec: 0,
+            source,
+        };
+        this.refresh();
+        this
+    }
+
+    pub fn refresh(&mut self) {
+        if self.min_kib_per_sec == 0 && self.max_kib_per_sec == 0 {
+            self.current_speed_bytes_per_sec = 0;
+            return;
+        }
+        let min = self.min_kib_per_sec.saturating_mul(1000);
+        let max = self.max_kib_per_sec.saturating_mul(1000);
+        self.current_speed_bytes_per_sec = self.source.sample(min, max);
+    }
+
+    #[must_use]
+    pub const fn current_speed(&self) -> u64 {
+        self.current_speed_bytes_per_sec
+    }
+
+    /// Whether the download faker is enabled (both bounds non-zero is enough,
+    /// 0/0 disables it entirely so the dispatcher hot-path can skip work).
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        !(self.min_kib_per_sec == 0 && self.max_kib_per_sec == 0)
+    }
+
+    pub fn update_limits(&mut self, config: &AppConfiguration) {
+        self.min_kib_per_sec = config.min_download_rate;
+        self.max_kib_per_sec = config.max_download_rate;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +155,23 @@ mod tests {
         AppConfiguration {
             min_upload_rate: min,
             max_upload_rate: max,
+            min_download_rate: 0,
+            max_download_rate: 0,
+            simultaneous_seed: 1,
+            client: "x.client".into(),
+            keep_torrent_with_zero_leechers: true,
+            upload_ratio_target: -1.0,
+            proxy_host: None,
+            proxy_port: None,
+        }
+    }
+
+    fn config_with_download(min_dl: u64, max_dl: u64) -> AppConfiguration {
+        AppConfiguration {
+            min_upload_rate: 0,
+            max_upload_rate: 0,
+            min_download_rate: min_dl,
+            max_download_rate: max_dl,
             simultaneous_seed: 1,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -160,5 +237,38 @@ mod tests {
             provider.refresh();
             assert_eq!(provider.current_speed(), 50_000);
         }
+    }
+
+    #[test]
+    fn download_provider_disabled_when_both_zero() {
+        // The hot-path optimisation: 0/0 stays 0 without ever calling the
+        // sampler, so a misconfigured rng would not leak in.
+        let source = Box::new(FixedSource::new(vec![999_999]));
+        let provider = DownloadSpeedProvider::with_source(&config_with_download(0, 0), source);
+        assert!(!provider.is_enabled());
+        assert_eq!(provider.current_speed(), 0);
+    }
+
+    #[test]
+    fn download_provider_samples_when_enabled() {
+        let source = Box::new(FixedSource::new(vec![60_000, 90_000]));
+        let mut provider =
+            DownloadSpeedProvider::with_source(&config_with_download(50, 100), source);
+        assert!(provider.is_enabled());
+        assert_eq!(provider.current_speed(), 60_000);
+        provider.refresh();
+        assert_eq!(provider.current_speed(), 90_000);
+    }
+
+    #[test]
+    fn download_provider_update_limits_can_disable_at_runtime() {
+        let source = Box::new(FixedSource::new(vec![60_000, 0]));
+        let mut provider =
+            DownloadSpeedProvider::with_source(&config_with_download(50, 100), source);
+        assert_eq!(provider.current_speed(), 60_000);
+        provider.update_limits(&config_with_download(0, 0));
+        provider.refresh();
+        assert!(!provider.is_enabled());
+        assert_eq!(provider.current_speed(), 0);
     }
 }

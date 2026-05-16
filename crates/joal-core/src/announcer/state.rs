@@ -74,6 +74,15 @@ pub struct Announcer {
     data_accessor: AnnounceDataAccessor,
     upload_ratio_target: f32,
     state: Mutex<AnnouncerState>,
+    /// Sticky bit set by the merger when the simulated download crosses the
+    /// `total_size` boundary (or the user toggles "initial completed" on).
+    /// On the next `RequestEvent::None` announce the executor swaps the
+    /// event to [`RequestEvent::Completed`] and clears this bit. Stored as
+    /// a `Mutex<bool>` rather than an `AtomicBool` because all access is
+    /// already serialised through the existing announcer-level lock paths,
+    /// and a mutex keeps the API uniform with the rest of the announcer
+    /// state.
+    pending_completed: Mutex<bool>,
 }
 
 impl std::fmt::Debug for Announcer {
@@ -103,7 +112,36 @@ impl Announcer {
             data_accessor,
             upload_ratio_target,
             state: Mutex::new(AnnouncerState::new_default()),
+            pending_completed: Mutex::new(false),
         }
+    }
+
+    /// Set the sticky `pending_completed` bit. Called by the merger task
+    /// when the bandwidth dispatcher reports a torrent just reached
+    /// `total_size`, or by the orchestrator when the user toggles "initial
+    /// completed" on at runtime.
+    pub fn mark_completed_pending(&self) {
+        let mut flag = self
+            .pending_completed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *flag = true;
+    }
+
+    /// Take and clear the `pending_completed` bit in one shot. Returns the
+    /// previous value, so the caller can decide whether to swap an
+    /// outgoing `None` event for `Completed`.
+    pub fn take_pending_completed(&self) -> bool {
+        let mut flag = self
+            .pending_completed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *flag, false)
+    }
+
+    #[must_use]
+    pub fn info_hash(&self) -> &InfoHash {
+        &self.torrent.info_hash
     }
 
     /// Send one announce and update the internal counters.
@@ -301,7 +339,7 @@ mod tests {
     use crate::announcer::request::AnnounceDataAccessor;
     use crate::announcer::state::{Announcer, MAX_CONSECUTIVE_FAILURES};
     use crate::announcer::tracker::{TrackerClient, TrackerClientUriProvider};
-    use crate::bandwidth::{BandwidthDispatcher, RandomSpeedProvider};
+    use crate::bandwidth::{BandwidthDispatcher, DownloadSpeedProvider, RandomSpeedProvider};
     use crate::client::{BitTorrentClient, BitTorrentClientConfig, ConnectionHandler};
     use crate::torrent::{InfoHash, MockedTorrent};
 
@@ -331,6 +369,8 @@ mod tests {
         let cfg = crate::config::AppConfiguration {
             min_upload_rate: 0,
             max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 1,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -341,8 +381,9 @@ mod tests {
         let dispatcher = Arc::new(BandwidthDispatcher::new(
             std::time::Duration::from_millis(100),
             RandomSpeedProvider::new(&cfg),
+            DownloadSpeedProvider::new(&cfg),
         ));
-        dispatcher.register_torrent(sample_torrent().info_hash);
+        dispatcher.register_torrent(sample_torrent().info_hash, sample_torrent().total_size, false);
         AnnounceDataAccessor::new(
             Arc::new(qb_client()),
             dispatcher,

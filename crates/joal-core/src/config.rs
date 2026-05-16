@@ -38,6 +38,17 @@ pub struct AppConfiguration {
     #[serde(rename = "maxUploadRate")]
     pub max_upload_rate: u64,
 
+    /// Lower bound (kB/s) for the simulated **download** speed. `0/0` disables
+    /// the download faker entirely — matching the historical behaviour where
+    /// `downloaded` and `left` were always reported as `0` to the tracker.
+    /// Optional in `config.json` for backward compatibility.
+    #[serde(rename = "minDownloadRate", default)]
+    pub min_download_rate: u64,
+
+    /// Upper bound (kB/s) for the simulated download speed. See [`min_download_rate`].
+    #[serde(rename = "maxDownloadRate", default)]
+    pub max_download_rate: u64,
+
     #[serde(rename = "simultaneousSeed")]
     pub simultaneous_seed: u32,
 
@@ -94,6 +105,11 @@ impl AppConfiguration {
         if self.max_upload_rate < self.min_upload_rate {
             return Err(ConfigError::Invalid(
                 "maxUploadRate must be greater than or equal to minUploadRate",
+            ));
+        }
+        if self.max_download_rate < self.min_download_rate {
+            return Err(ConfigError::Invalid(
+                "maxDownloadRate must be greater than or equal to minDownloadRate",
             ));
         }
         if self.simultaneous_seed < 1 {
@@ -284,10 +300,38 @@ mod tests {
     }
 
     #[test]
+    fn download_rate_defaults_to_zero_when_absent() {
+        // Old config.json files without download fields must still load and
+        // disable the download faker (0/0 == off).
+        let cfg: AppConfiguration = serde_json::from_str(SAMPLE).unwrap();
+        assert_eq!(cfg.min_download_rate, 0);
+        assert_eq!(cfg.max_download_rate, 0);
+    }
+
+    #[test]
+    fn rejects_max_download_less_than_min_download() {
+        let cfg = AppConfiguration {
+            min_upload_rate: 0,
+            max_upload_rate: 0,
+            min_download_rate: 100,
+            max_download_rate: 50,
+            simultaneous_seed: 1,
+            client: "x.client".into(),
+            keep_torrent_with_zero_leechers: true,
+            upload_ratio_target: -1.0,
+            proxy_host: None,
+            proxy_port: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn rejects_max_less_than_min() {
         let cfg = AppConfiguration {
             min_upload_rate: 100,
             max_upload_rate: 50,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 1,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -303,6 +347,8 @@ mod tests {
         let cfg = AppConfiguration {
             min_upload_rate: 0,
             max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 0,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -318,6 +364,8 @@ mod tests {
         let cfg = AppConfiguration {
             min_upload_rate: 0,
             max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 1,
             client: "   ".into(),
             keep_torrent_with_zero_leechers: true,
@@ -333,6 +381,8 @@ mod tests {
         let cfg = AppConfiguration {
             min_upload_rate: 0,
             max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 1,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -352,6 +402,8 @@ mod tests {
         let original = AppConfiguration {
             min_upload_rate: 30,
             max_upload_rate: 170,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 10,
             client: "qbittorrent-4.5.0.client".into(),
             keep_torrent_with_zero_leechers: true,
@@ -380,6 +432,8 @@ mod tests {
         let cfg = AppConfiguration {
             min_upload_rate: 0,
             max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
             simultaneous_seed: 1,
             client: "x.client".into(),
             keep_torrent_with_zero_leechers: true,

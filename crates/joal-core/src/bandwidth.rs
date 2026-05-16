@@ -41,7 +41,7 @@ pub mod weight;
 
 pub use dispatcher::{BandwidthDispatcher, BandwidthError};
 pub use peers::Peers;
-pub use random_speed::{RandomSpeedProvider, RandomSpeedSource};
+pub use random_speed::{DownloadSpeedProvider, RandomSpeedProvider, RandomSpeedSource};
 pub use speed::Speed;
-pub use stats::TorrentSeedStats;
+pub use stats::{DownloadEdge, TorrentSeedStats};
 pub use weight::{PeersAwareWeightCalculator, WeightHolder};
