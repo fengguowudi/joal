@@ -5,6 +5,7 @@ pub mod i18n;
 mod log_panel;
 mod speed_chart;
 mod status_bar;
+mod theme;
 mod torrent_table;
 
 use std::collections::VecDeque;
@@ -22,6 +23,10 @@ use i18n::{Language, tr};
 
 const LOG_BUFFER_CAPACITY: usize = 500;
 const SPEED_HISTORY_CAPACITY: usize = 300;
+
+pub fn configure_visuals(ctx: &egui::Context) {
+    theme::apply(ctx);
+}
 
 pub struct LogEntry {
     pub timestamp: Instant,
@@ -573,93 +578,94 @@ impl eframe::App for JoalApp {
 
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             status_bar::top_bar(ui, &self.current_snapshot, self.engine_running, t);
-            ui.horizontal(|ui| {
-                // Start/Stop button
-                let engine_toggle_clicked = ui
-                    .scope_builder(
-                        egui::UiBuilder::new().id(egui::Id::new("engine_toggle_button")),
-                        |ui| {
-                            if self.engine_running {
-                                ui.add(egui::Button::new(t.stop).min_size(egui::vec2(78.0, 0.0)))
-                                    .clicked()
-                            } else {
-                                ui.add(egui::Button::new(t.start).min_size(egui::vec2(78.0, 0.0)))
-                                    .clicked()
-                            }
-                        },
-                    )
-                    .inner;
-                if engine_toggle_clicked {
-                    if self.engine_running {
-                        self.send_command(EngineCommand::Stop);
+            ui.add_space(10.0);
+            theme::panel_frame().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let engine_label = if self.engine_running { t.stop } else { t.start };
+                    let engine_tone = if self.engine_running {
+                        theme::Tone::Danger
                     } else {
-                        self.send_command(EngineCommand::Start);
-                    }
-                }
-                ui.separator();
-                // Config panel toggle
-                let config_toggle_clicked = ui
-                    .scope_builder(
-                        egui::UiBuilder::new().id(egui::Id::new("config_panel_toggle_button")),
-                        |ui| {
-                            ui.add(
-                                egui::Button::new(if self.show_config_panel {
-                                    t.hide_config
-                                } else {
-                                    t.config
-                                })
-                                .min_size(egui::vec2(96.0, 0.0)),
-                            )
-                            .clicked()
-                        },
+                        theme::Tone::Success
+                    };
+                    let engine_toggle_clicked = toolbar_action(
+                        ui,
+                        "engine_toggle_button",
+                        toolbar_button(engine_label, engine_tone, true),
+                        92.0,
                     )
-                    .inner;
-                if config_toggle_clicked {
-                    self.show_config_panel = !self.show_config_panel;
-                    if self.show_config_panel {
-                        self.send_command(EngineCommand::ListClients);
+                    .clicked();
+                    if engine_toggle_clicked {
+                        if self.engine_running {
+                            self.send_command(EngineCommand::Stop);
+                        } else {
+                            self.send_command(EngineCommand::Start);
+                        }
                     }
-                }
-                ui.separator();
-                // Add torrent button
-                if ui
-                    .add(egui::Button::new(t.add_torrent).min_size(egui::vec2(104.0, 0.0)))
+
+                    let config_toggle_clicked = toolbar_action(
+                        ui,
+                        "config_panel_toggle_button",
+                        toolbar_button(
+                            if self.show_config_panel {
+                                t.hide_config
+                            } else {
+                                t.config
+                            },
+                            theme::Tone::Accent,
+                            self.show_config_panel,
+                        ),
+                        112.0,
+                    )
+                    .clicked();
+                    if config_toggle_clicked {
+                        self.show_config_panel = !self.show_config_panel;
+                        if self.show_config_panel {
+                            self.send_command(EngineCommand::ListClients);
+                        }
+                    }
+
+                    if toolbar_action(
+                        ui,
+                        "add_torrent_button",
+                        toolbar_button(t.add_torrent, theme::Tone::Neutral, false),
+                        116.0,
+                    )
                     .clicked()
-                    && let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("Torrent files", &["torrent"])
-                        .pick_files()
-                {
-                    for path in paths {
-                        self.send_command(EngineCommand::AddTorrent(path));
+                        && let Some(paths) = rfd::FileDialog::new()
+                            .add_filter("Torrent files", &["torrent"])
+                            .pick_files()
+                    {
+                        for path in paths {
+                            self.send_command(EngineCommand::AddTorrent(path));
+                        }
                     }
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        self.engine_running,
-                        egui::Button::new(t.announce_all_now).min_size(egui::vec2(142.0, 0.0)),
-                    )
-                    .clicked()
-                {
-                    self.send_command(EngineCommand::AnnounceAllNow);
-                }
-                ui.separator();
-                // Language toggle
-                let language_toggle_clicked = ui
-                    .scope_builder(
-                        egui::UiBuilder::new().id(egui::Id::new("language_toggle_button")),
-                        |ui| {
-                            ui.add(
-                                egui::Button::new(self.language.toggle().label())
-                                    .min_size(egui::vec2(60.0, 0.0)),
+
+                    let announce_response = ui.push_id("announce_all_button", |ui| {
+                        ui.add_enabled(
+                            self.engine_running,
+                            toolbar_button(
+                                t.announce_all_now,
+                                theme::Tone::Info,
+                                self.engine_running,
                             )
-                            .clicked()
-                        },
+                            .min_size(egui::vec2(148.0, 30.0)),
+                        )
+                    });
+                    if announce_response.inner.clicked() {
+                        self.send_command(EngineCommand::AnnounceAllNow);
+                    }
+
+                    let language_toggle_clicked = toolbar_action(
+                        ui,
+                        "language_toggle_button",
+                        toolbar_button(self.language.toggle().label(), theme::Tone::Neutral, false),
+                        68.0,
                     )
-                    .inner;
-                if language_toggle_clicked {
-                    self.language = self.language.toggle();
-                }
+                    .clicked();
+                    if language_toggle_clicked {
+                        self.language = self.language.toggle();
+                    }
+                });
             });
         });
 
@@ -675,18 +681,22 @@ impl eframe::App for JoalApp {
                 .max_size(460.0)
                 .resizable(true)
                 .show_inside(ui, |ui| {
-                    let action = config_panel::show(
-                        ui,
-                        &mut self.config_edit,
-                        config_panel::ConfigPanelView {
-                            validation_errors: &self.config_validation_errors,
-                            operation_error: self.config_operation_error.as_deref(),
-                            notice: self.config_notice,
-                            apply_in_progress: self.config_apply_in_progress,
-                            available_clients: &self.available_clients,
-                            t,
-                        },
-                    );
+                    let action = theme::panel_frame()
+                        .show(ui, |ui| {
+                            config_panel::show(
+                                ui,
+                                &mut self.config_edit,
+                                config_panel::ConfigPanelView {
+                                    validation_errors: &self.config_validation_errors,
+                                    operation_error: self.config_operation_error.as_deref(),
+                                    notice: self.config_notice,
+                                    apply_in_progress: self.config_apply_in_progress,
+                                    available_clients: &self.available_clients,
+                                    t,
+                                },
+                            )
+                        })
+                        .inner;
                     if action.edited {
                         self.config_validation_errors.clear();
                         self.config_operation_error = None;
@@ -837,6 +847,34 @@ fn format_event(event: &EngineEvent) -> String {
             )
         }
     }
+}
+
+fn toolbar_action(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    button: egui::Button<'_>,
+    min_width: f32,
+) -> egui::Response {
+    ui.push_id(id, |ui| ui.add_sized([min_width, 30.0], button))
+        .inner
+}
+
+fn toolbar_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui::Button<'_> {
+    let palette = theme::tone_colors(if highlighted {
+        tone
+    } else {
+        theme::Tone::Neutral
+    });
+    egui::Button::new(egui::RichText::new(label).strong().color(if highlighted {
+        palette.fg
+    } else {
+        theme::text_primary()
+    }))
+    .fill(palette.bg)
+    .stroke(egui::Stroke::new(1.0, palette.stroke))
+    .corner_radius(egui::CornerRadius::same(6))
+    .selected(highlighted)
+    .frame_when_inactive(true)
 }
 
 #[cfg(test)]

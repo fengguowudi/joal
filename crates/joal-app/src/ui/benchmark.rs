@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use super::config_panel;
 use super::i18n::{Language, tr};
 use super::{
-    ConfigEditState, DeleteConfirmation, LogEntry, log_panel, speed_chart, status_bar,
+    ConfigEditState, DeleteConfirmation, LogEntry, log_panel, speed_chart, status_bar, theme,
     torrent_table,
 };
 
@@ -190,6 +190,7 @@ fn benchmark_ui_frame(
     frames: usize,
 ) -> (f64, f64) {
     let ctx = egui::Context::default();
+    theme::apply(&ctx);
     let mut snapshot = snapshot.clone();
     let mut config_edit = ConfigEditState::from_snapshot(
         &snapshot,

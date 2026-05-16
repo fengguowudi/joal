@@ -5,8 +5,7 @@ use joal_core::snapshot::{EngineSnapshot, TorrentStatus};
 use tokio::sync::mpsc;
 
 use super::DeleteConfirmation;
-use super::i18n::Tr;
-use super::status_bar::format_speed;
+use super::{i18n::Tr, status_bar::format_speed, theme};
 use crate::EngineCommand;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,25 +75,55 @@ pub fn show(
     table_state: &mut TableState,
     t: &Tr,
 ) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut table_state.search_query)
-                .hint_text(t.search_torrents)
-                .desired_width(220.0),
-        );
-        ui.checkbox(&mut table_state.attention_only, t.attention_only);
-        ui.separator();
-        ui.label(format!(
-            "{}/{}",
-            visible_count(snapshot, table_state),
-            snapshot.torrents.len()
-        ));
+    theme::panel_frame().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let search_response = ui
+                .push_id("torrent_table_search", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut table_state.search_query)
+                            .id_salt("torrent_table_search")
+                            .hint_text(t.search_torrents)
+                            .desired_width(240.0),
+                    )
+                })
+                .inner;
+            if search_response.changed() {
+                search_response.request_focus();
+            }
+
+            let attention_toggle = table_filter_button(
+                t.attention_only,
+                theme::Tone::Warning,
+                table_state.attention_only,
+            );
+            let attention_response = ui
+                .push_id("torrent_table_attention_toggle", |ui| {
+                    ui.add_sized([150.0, 30.0], attention_toggle)
+                })
+                .inner
+                .on_hover_text(t.attention_hint);
+            if attention_response.clicked() {
+                table_state.attention_only = !table_state.attention_only;
+            }
+
+            theme::metric(
+                ui,
+                "visible_row_count",
+                "",
+                format!(
+                    "{}/{}",
+                    visible_count(snapshot, table_state),
+                    snapshot.torrents.len()
+                ),
+                theme::Tone::Neutral,
+            );
+        });
     });
     ui.add_space(8.0);
 
     if snapshot.torrents.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(t.no_torrents);
+            ui.label(egui::RichText::new(t.no_torrents).color(theme::text_secondary()));
         });
         return;
     }
@@ -102,7 +131,7 @@ pub fn show(
     let visible_indices = visible_torrent_indices(&snapshot.torrents, table_state);
     if visible_indices.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(t.no_matching_torrents);
+            ui.label(egui::RichText::new(t.no_matching_torrents).color(theme::text_secondary()));
         });
         return;
     }
@@ -183,94 +212,141 @@ pub fn show(
         })
         .body(|body| {
             body.rows(row_height, visible_indices.len(), |mut row| {
-                let index = visible_indices[row.index()];
+                let row_index = row.index();
+                let index = visible_indices[row_index];
                 let torrent = &mut snapshot.torrents[index];
                 row.col(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&torrent.name).strong());
-                        ui.label(egui::RichText::new(short_hash(torrent)).small().weak());
+                    cell_scope(ui, row_index, "name", |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(&torrent.name)
+                                    .strong()
+                                    .color(theme::text_primary()),
+                            );
+                            ui.label(
+                                egui::RichText::new(short_hash(torrent))
+                                    .monospace()
+                                    .small()
+                                    .color(theme::text_secondary()),
+                            );
+                        });
                     });
                 });
                 row.col(|ui| {
-                    let progress = progress_fraction(torrent);
-                    ui.add(
-                        egui::ProgressBar::new(progress as f32)
-                            .desired_width(ui.available_width())
-                            .text(progress_text(torrent)),
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(format_speed(torrent.current_speed_bps));
-                });
-                row.col(|ui| {
-                    ui.label(format_bytes(torrent.uploaded_bytes));
-                });
-                row.col(|ui| {
-                    ui.label(format_speed(torrent.current_download_speed_bps));
-                });
-                row.col(|ui| {
-                    ui.label(format_bytes(torrent.downloaded_bytes));
-                });
-                row.col(|ui| {
-                    ui.label(opt_u32(torrent.last_known_seeders));
-                });
-                row.col(|ui| {
-                    ui.label(opt_u32(torrent.last_known_leechers));
-                });
-                row.col(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(last_announce_text(torrent, t));
-                        ui.label(
-                            egui::RichText::new(interval_text(torrent, t))
-                                .small()
-                                .weak(),
+                    cell_scope(ui, row_index, "progress", |ui| {
+                        let progress = progress_fraction(torrent);
+                        let tone = if progress >= 1.0 || torrent.initial_completed {
+                            theme::Tone::Success
+                        } else {
+                            theme::Tone::Accent
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(progress as f32)
+                                .desired_width(ui.available_width())
+                                .fill(theme::tone_colors(tone).bg)
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .text(progress_text(torrent)),
                         );
                     });
                 });
                 row.col(|ui| {
-                    health_cell(ui, torrent, t);
+                    cell_scope(ui, row_index, "upload_speed", |ui| {
+                        ui.label(format_speed(torrent.current_speed_bps));
+                    });
                 });
                 row.col(|ui| {
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .id(egui::Id::new(("torrent_row_actions", &torrent.info_hash))),
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                let mark_label = if torrent.initial_completed {
-                                    t.action_marked_complete
-                                } else {
-                                    t.action_mark_complete
-                                };
-                                let mut mark_button = egui::Button::new(mark_label);
-                                if torrent.initial_completed {
-                                    mark_button =
-                                        mark_button.fill(egui::Color32::from_rgb(55, 110, 70));
-                                }
-                                let response = ui
-                                    .add_sized([98.0, 22.0], mark_button)
-                                    .on_hover_text(t.mark_completed_tooltip);
-                                if response.clicked() {
-                                    torrent.initial_completed = !torrent.initial_completed;
-                                    let _ = cmd_tx.try_send(
-                                        EngineCommand::SetTorrentInitialCompleted {
-                                            info_hash: torrent.info_hash.clone(),
-                                            completed: torrent.initial_completed,
-                                        },
-                                    );
-                                }
-
-                                if ui
-                                    .add_sized([64.0, 22.0], egui::Button::new(t.action_archive))
-                                    .clicked()
-                                {
-                                    *pending_delete = Some(DeleteConfirmation {
+                    cell_scope(ui, row_index, "uploaded", |ui| {
+                        ui.label(format_bytes(torrent.uploaded_bytes));
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "download_speed", |ui| {
+                        ui.label(format_speed(torrent.current_download_speed_bps));
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "downloaded", |ui| {
+                        ui.label(format_bytes(torrent.downloaded_bytes));
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "seeders", |ui| {
+                        ui.label(opt_u32(torrent.last_known_seeders));
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "leechers", |ui| {
+                        ui.label(opt_u32(torrent.last_known_leechers));
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "announce_meta", |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(last_announce_text(torrent, t));
+                            ui.label(
+                                egui::RichText::new(interval_text(torrent, t))
+                                    .small()
+                                    .color(theme::text_secondary()),
+                            );
+                        });
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "health", |ui| {
+                        health_cell(ui, row_index, torrent, t);
+                    });
+                });
+                row.col(|ui| {
+                    cell_scope(ui, row_index, "actions", |ui| {
+                        ui.horizontal(|ui| {
+                            let mark_label = if torrent.initial_completed {
+                                t.action_marked_complete
+                            } else {
+                                t.action_mark_complete
+                            };
+                            let response = ui
+                                .push_id("mark_completed", |ui| {
+                                    ui.add_sized(
+                                        [108.0, 24.0],
+                                        row_action_button(
+                                            mark_label,
+                                            theme::Tone::Success,
+                                            torrent.initial_completed,
+                                        ),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(t.mark_completed_tooltip);
+                            if response.clicked() {
+                                torrent.initial_completed = !torrent.initial_completed;
+                                let _ =
+                                    cmd_tx.try_send(EngineCommand::SetTorrentInitialCompleted {
                                         info_hash: torrent.info_hash.clone(),
-                                        name: torrent.name.clone(),
+                                        completed: torrent.initial_completed,
                                     });
-                                }
-                            });
-                        },
-                    );
+                            }
+
+                            if ui
+                                .push_id("archive_torrent", |ui| {
+                                    ui.add_sized(
+                                        [74.0, 24.0],
+                                        row_action_button(
+                                            t.action_archive,
+                                            theme::Tone::Danger,
+                                            true,
+                                        ),
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                *pending_delete = Some(DeleteConfirmation {
+                                    info_hash: torrent.info_hash.clone(),
+                                    name: torrent.name.clone(),
+                                });
+                            }
+                        });
+                    });
                 });
             });
         });
@@ -387,6 +463,7 @@ fn sortable_header(
     label: &str,
 ) {
     header.col(|ui| {
+        let active = table_state.sort_column == column;
         let button_label = if table_state.sort_column == column {
             format!(
                 "{} {}",
@@ -400,10 +477,39 @@ fn sortable_header(
             label.to_owned()
         };
         let clicked = ui
-            .scope_builder(
-                egui::UiBuilder::new().id(egui::Id::new(("torrent_table_sort", column))),
-                |ui| ui.button(button_label).clicked(),
-            )
+            .push_id(("torrent_table_sort", column), |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 24.0],
+                    egui::Button::new(egui::RichText::new(button_label).strong().color(
+                        if active {
+                            theme::tone_colors(theme::Tone::Accent).fg
+                        } else {
+                            theme::text_primary()
+                        },
+                    ))
+                    .fill(
+                        theme::tone_colors(if active {
+                            theme::Tone::Accent
+                        } else {
+                            theme::Tone::Neutral
+                        })
+                        .bg,
+                    )
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        theme::tone_colors(if active {
+                            theme::Tone::Accent
+                        } else {
+                            theme::Tone::Neutral
+                        })
+                        .stroke,
+                    ))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .selected(active)
+                    .frame_when_inactive(true),
+                )
+                .clicked()
+            })
             .inner;
         if clicked {
             table_state.toggle_sort(column);
@@ -411,34 +517,25 @@ fn sortable_header(
     });
 }
 
-fn health_cell(ui: &mut egui::Ui, torrent: &TorrentStatus, t: &Tr) {
-    let (label, color) = if torrent.consecutive_fails > 3 {
-        (t.status_tracker_error, egui::Color32::from_rgb(220, 60, 60))
+fn health_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus, t: &Tr) {
+    let (label, tone) = if torrent.consecutive_fails > 3 {
+        (t.status_tracker_error, theme::Tone::Danger)
     } else if torrent.consecutive_fails > 0 {
-        (
-            t.status_tracker_warning,
-            egui::Color32::from_rgb(220, 180, 50),
-        )
+        (t.status_tracker_warning, theme::Tone::Warning)
     } else if torrent.last_known_leechers == Some(0) {
-        (
-            t.status_zero_leechers,
-            egui::Color32::from_rgb(160, 140, 60),
-        )
+        (t.status_zero_leechers, theme::Tone::Warning)
     } else if torrent.last_announced_at.is_none() {
-        (
-            t.status_pending_announce,
-            egui::Color32::from_rgb(120, 150, 200),
-        )
+        (t.status_pending_announce, theme::Tone::Info)
     } else {
-        (t.status_healthy, egui::Color32::from_rgb(80, 200, 80))
+        (t.status_healthy, theme::Tone::Success)
     };
 
     ui.vertical(|ui| {
-        ui.colored_label(color, label);
+        theme::badge(ui, (row_index, "health_badge"), label, tone);
         ui.label(
             egui::RichText::new(health_detail(torrent, t))
                 .small()
-                .weak(),
+                .color(theme::text_secondary()),
         );
     });
 }
@@ -521,9 +618,51 @@ fn progress_text(torrent: &TorrentStatus) -> String {
     format!("{:.1}%", progress_fraction(torrent) * 100.0)
 }
 
+fn cell_scope<R>(
+    ui: &mut egui::Ui,
+    row_index: usize,
+    key: &'static str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.push_id((row_index, key), add_contents).inner
+}
+
+fn table_filter_button(label: &str, tone: theme::Tone, selected: bool) -> egui::Button<'_> {
+    let palette = theme::tone_colors(if selected { tone } else { theme::Tone::Neutral });
+    egui::Button::new(egui::RichText::new(label).strong().color(if selected {
+        palette.fg
+    } else {
+        theme::text_primary()
+    }))
+    .fill(palette.bg)
+    .stroke(egui::Stroke::new(1.0, palette.stroke))
+    .corner_radius(egui::CornerRadius::same(6))
+    .selected(selected)
+    .frame_when_inactive(true)
+}
+
+fn row_action_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui::Button<'_> {
+    let palette = theme::tone_colors(if highlighted {
+        tone
+    } else {
+        theme::Tone::Neutral
+    });
+    egui::Button::new(egui::RichText::new(label).strong().color(if highlighted {
+        palette.fg
+    } else {
+        theme::text_primary()
+    }))
+    .fill(palette.bg)
+    .stroke(egui::Stroke::new(1.0, palette.stroke))
+    .corner_radius(egui::CornerRadius::same(6))
+    .selected(highlighted)
+    .frame_when_inactive(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::i18n::{Language, tr};
     use joal_core::torrent::InfoHash;
 
     fn torrent(name: &str, fill: u8) -> TorrentStatus {
@@ -593,5 +732,72 @@ mod tests {
 
         let visible = visible_torrent_indices(&[low, high], &state);
         assert_eq!(visible, vec![1, 0]);
+    }
+
+    #[test]
+    fn attention_toggle_across_discarded_pass_keeps_widget_ids_stable() {
+        let ctx = egui::Context::default();
+        let mut healthy = torrent("Healthy", 0x11);
+        healthy.last_known_leechers = Some(5);
+
+        let mut warning = torrent("Warn", 0x22);
+        warning.consecutive_fails = 1;
+
+        let mut snapshot = EngineSnapshot {
+            active_client_filename: "utorrent-3.5.0_43916.client".to_owned(),
+            global_upload_speed_bps: 0,
+            global_download_speed_bps: 0,
+            torrents: vec![healthy, warning],
+        };
+        let mut pending_delete = None;
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let mut table_state = TableState::default();
+        let mut first_pass = true;
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+
+        let output = ctx.run_ui(raw_input, |ui| {
+            show(
+                ui,
+                &mut snapshot,
+                &mut pending_delete,
+                &cmd_tx,
+                &mut table_state,
+                tr(Language::Chinese),
+            );
+            if first_pass {
+                first_pass = false;
+                table_state.attention_only = true;
+                ui.ctx().request_discard("apply attention filter");
+            }
+        });
+
+        assert!(
+            !contains_id_warning_shape(&output.shapes),
+            "expected no debug warning shapes after a discarded-pass filter change",
+        );
+    }
+
+    fn contains_id_warning_shape(shapes: &[egui::epaint::ClippedShape]) -> bool {
+        shapes
+            .iter()
+            .any(|clipped| shape_contains_id_warning(&clipped.shape))
+    }
+
+    fn shape_contains_id_warning(shape: &egui::epaint::Shape) -> bool {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => {
+                rect.fill == egui::Color32::TRANSPARENT
+                    && rect.stroke.color == egui::Color32::RED
+                    && (rect.stroke.width - 2.0).abs() < f32::EPSILON
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(shape_contains_id_warning),
+            _ => false,
+        }
     }
 }

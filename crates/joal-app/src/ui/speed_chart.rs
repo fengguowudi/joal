@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 
 use egui_plot::{Line, Plot, PlotPoints};
 
-use super::i18n::Tr;
+use super::{i18n::Tr, theme};
 
 pub fn show(ui: &mut egui::Ui, speed_history: &VecDeque<(f64, f64)>, t: &Tr) {
     if speed_history.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(t.waiting_for_speed_data);
+            ui.label(egui::RichText::new(t.waiting_for_speed_data).color(theme::text_secondary()));
         });
         return;
     }
@@ -18,7 +18,7 @@ pub fn show(ui: &mut egui::Ui, speed_history: &VecDeque<(f64, f64)>, t: &Tr) {
         .collect();
 
     let series: PlotPoints<'_> = points.into();
-    let line = Line::new(t.upload_kbs, series);
+    let line = Line::new(t.upload_kbs, series).color(theme::tone_colors(theme::Tone::Accent).fg);
 
     Plot::new("speed_chart")
         .height(ui.available_height())

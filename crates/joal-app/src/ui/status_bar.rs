@@ -1,6 +1,6 @@
 use joal_core::snapshot::EngineSnapshot;
 
-use super::i18n::Tr;
+use super::{i18n::Tr, theme};
 
 pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
     let attention_count = snapshot
@@ -14,53 +14,94 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
         .filter(|torrent| torrent.last_known_leechers == Some(0))
         .count();
 
-    ui.horizontal(|ui| {
-        // Engine status indicator
-        if engine_running {
-            ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "\u{25CF}");
-        } else {
-            ui.colored_label(egui::Color32::from_rgb(200, 60, 60), "\u{25CF}");
-        }
-        ui.separator();
-        ui.label(
-            egui::RichText::new(format!("{}: {}", t.client, snapshot.active_client_filename))
-                .strong(),
+    ui.horizontal_wrapped(|ui| {
+        theme::badge(
+            ui,
+            "engine_state",
+            if engine_running { t.running } else { t.stopped },
+            if engine_running {
+                theme::Tone::Success
+            } else {
+                theme::Tone::Danger
+            },
         );
-        ui.separator();
-        ui.label(format!(
-            "▲: {}",
-            format_speed(snapshot.global_upload_speed_bps)
-        ));
-        ui.separator();
-        ui.label(format!(
-            "▼: {}",
-            format_speed(snapshot.global_download_speed_bps)
-        ));
-        ui.separator();
-        ui.label(format!("{}: {}", t.torrents, snapshot.torrents.len()));
-        ui.separator();
-        ui.label(format!("{}: {}", t.attention, attention_count));
-        ui.separator();
-        ui.label(format!("{}: {}", t.zero_leechers, zero_leecher_count));
+        theme::metric(
+            ui,
+            "active_client",
+            t.client,
+            &snapshot.active_client_filename,
+            theme::Tone::Neutral,
+        );
+        theme::metric(
+            ui,
+            "global_upload_speed",
+            "▲",
+            format_speed(snapshot.global_upload_speed_bps),
+            theme::Tone::Accent,
+        );
+        theme::metric(
+            ui,
+            "global_download_speed",
+            "▼",
+            format_speed(snapshot.global_download_speed_bps),
+            theme::Tone::Info,
+        );
+        theme::metric(
+            ui,
+            "torrent_count",
+            t.torrents,
+            snapshot.torrents.len(),
+            theme::Tone::Neutral,
+        );
+        theme::metric(
+            ui,
+            "attention_count",
+            t.attention,
+            attention_count,
+            if attention_count > 0 {
+                theme::Tone::Warning
+            } else {
+                theme::Tone::Success
+            },
+        );
+        theme::metric(
+            ui,
+            "zero_leechers_count",
+            t.zero_leechers,
+            zero_leecher_count,
+            if zero_leecher_count > 0 {
+                theme::Tone::Warning
+            } else {
+                theme::Tone::Neutral
+            },
+        );
     });
 }
 
 pub fn bottom_bar(ui: &mut egui::Ui, started_at: std::time::Instant, engine_running: bool, t: &Tr) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let elapsed = started_at.elapsed().as_secs();
         let h = elapsed / 3600;
         let m = (elapsed % 3600) / 60;
         let s = elapsed % 60;
 
-        if engine_running {
-            ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "\u{25CF}");
-            ui.label(t.running);
-        } else {
-            ui.colored_label(egui::Color32::from_rgb(200, 60, 60), "\u{25CF}");
-            ui.label(t.stopped);
-        }
-        ui.separator();
-        ui.label(format!("{}: {h:02}:{m:02}:{s:02}", t.uptime));
+        theme::badge(
+            ui,
+            "engine_status_footer",
+            if engine_running { t.running } else { t.stopped },
+            if engine_running {
+                theme::Tone::Success
+            } else {
+                theme::Tone::Danger
+            },
+        );
+        theme::metric(
+            ui,
+            "uptime_footer",
+            t.uptime,
+            format!("{h:02}:{m:02}:{s:02}"),
+            theme::Tone::Neutral,
+        );
     });
 }
 

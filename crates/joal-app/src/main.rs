@@ -154,6 +154,7 @@ fn main() -> Result<()> {
         native_options,
         Box::new(move |cc| {
             configure_cjk_fonts(&cc.egui_ctx);
+            ui::configure_visuals(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     ) {
