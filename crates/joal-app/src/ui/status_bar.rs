@@ -16,10 +16,11 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
                 .strong(),
         );
         ui.separator();
+        ui.label(format!("▲: {}", format_speed(snapshot.global_upload_speed_bps)));
+        ui.separator();
         ui.label(format!(
-            "{}: {}",
-            t.upload,
-            format_speed(snapshot.global_upload_speed_bps)
+            "▼: {}",
+            format_speed(snapshot.global_download_speed_bps)
         ));
         ui.separator();
         ui.label(format!("{}: {}", t.torrents, snapshot.torrents.len()));

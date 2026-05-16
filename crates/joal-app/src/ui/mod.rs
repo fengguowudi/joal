@@ -68,6 +68,8 @@ pub struct JoalApp {
 struct ConfigEditState {
     min_upload_rate: String,
     max_upload_rate: String,
+    min_download_rate: String,
+    max_download_rate: String,
     simultaneous_seed: String,
     upload_ratio_target: String,
     selected_client: String,
@@ -82,6 +84,8 @@ impl ConfigEditState {
             Self {
                 min_upload_rate: cfg.min_upload_rate.to_string(),
                 max_upload_rate: cfg.max_upload_rate.to_string(),
+                min_download_rate: cfg.min_download_rate.to_string(),
+                max_download_rate: cfg.max_download_rate.to_string(),
                 simultaneous_seed: cfg.simultaneous_seed.to_string(),
                 upload_ratio_target: format!("{:.1}", cfg.upload_ratio_target),
                 selected_client: cfg.client.clone(),
@@ -93,6 +97,8 @@ impl ConfigEditState {
             Self {
                 min_upload_rate: "30".to_owned(),
                 max_upload_rate: "170".to_owned(),
+                min_download_rate: "0".to_owned(),
+                max_download_rate: "0".to_owned(),
                 simultaneous_seed: "5".to_owned(),
                 upload_ratio_target: "-1.0".to_owned(),
                 selected_client: snapshot.active_client_filename.clone(),
@@ -106,6 +112,8 @@ impl ConfigEditState {
     fn to_config(&self) -> Option<AppConfiguration> {
         let min_upload_rate = self.min_upload_rate.parse::<u64>().ok()?;
         let max_upload_rate = self.max_upload_rate.parse::<u64>().ok()?;
+        let min_download_rate = self.min_download_rate.parse::<u64>().ok()?;
+        let max_download_rate = self.max_download_rate.parse::<u64>().ok()?;
         let simultaneous_seed = self.simultaneous_seed.parse::<u32>().ok()?;
         let upload_ratio_target = self.upload_ratio_target.parse::<f32>().ok()?;
         let proxy_host = if self.proxy_host.trim().is_empty() {
@@ -121,6 +129,8 @@ impl ConfigEditState {
         Some(AppConfiguration {
             min_upload_rate,
             max_upload_rate,
+            min_download_rate,
+            max_download_rate,
             simultaneous_seed,
             client: self.selected_client.clone(),
             keep_torrent_with_zero_leechers: self.keep_torrent_with_zero_leechers,
@@ -289,20 +299,29 @@ impl eframe::App for JoalApp {
             ui.horizontal(|ui| {
                 // Start/Stop button
                 if self.engine_running {
-                    if ui.button(t.stop).clicked() {
+                    if ui
+                        .add(egui::Button::new(t.stop).min_size(egui::vec2(78.0, 0.0)))
+                        .clicked()
+                    {
                         self.send_command(EngineCommand::Stop);
                     }
-                } else if ui.button(t.start).clicked() {
+                } else if ui
+                    .add(egui::Button::new(t.start).min_size(egui::vec2(78.0, 0.0)))
+                    .clicked()
+                {
                     self.send_command(EngineCommand::Start);
                 }
                 ui.separator();
                 // Config panel toggle
                 if ui
-                    .button(if self.show_config_panel {
-                        t.hide_config
-                    } else {
-                        t.config
-                    })
+                    .add(
+                        egui::Button::new(if self.show_config_panel {
+                            t.hide_config
+                        } else {
+                            t.config
+                        })
+                        .min_size(egui::vec2(96.0, 0.0)),
+                    )
                     .clicked()
                 {
                     self.show_config_panel = !self.show_config_panel;
@@ -312,7 +331,9 @@ impl eframe::App for JoalApp {
                 }
                 ui.separator();
                 // Add torrent button
-                if ui.button(t.add_torrent).clicked()
+                if ui
+                    .add(egui::Button::new(t.add_torrent).min_size(egui::vec2(104.0, 0.0)))
+                    .clicked()
                     && let Some(paths) = rfd::FileDialog::new()
                         .add_filter("Torrent files", &["torrent"])
                         .pick_files()
@@ -322,8 +343,25 @@ impl eframe::App for JoalApp {
                     }
                 }
                 ui.separator();
+                if ui
+                    .add_enabled(
+                        self.engine_running,
+                        egui::Button::new(t.announce_all_now)
+                            .min_size(egui::vec2(142.0, 0.0)),
+                    )
+                    .clicked()
+                {
+                    self.send_command(EngineCommand::AnnounceAllNow);
+                }
+                ui.separator();
                 // Language toggle
-                if ui.button(self.language.toggle().label()).clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(self.language.toggle().label())
+                            .min_size(egui::vec2(60.0, 0.0)),
+                    )
+                    .clicked()
+                {
                     self.language = self.language.toggle();
                 }
             });
@@ -388,7 +426,13 @@ impl eframe::App for JoalApp {
             let log_height = (available * 0.10).max(80.0);
 
             ui.allocate_ui(egui::vec2(ui.available_width(), table_height), |ui| {
-                torrent_table::show(ui, &self.current_snapshot, &mut self.pending_delete, t);
+                torrent_table::show(
+                    ui,
+                    &mut self.current_snapshot,
+                    &mut self.pending_delete,
+                    &self.cmd_tx,
+                    t,
+                );
             });
 
             ui.separator();
@@ -457,8 +501,12 @@ fn format_event(event: &EngineEvent) -> String {
         }
         EngineEvent::ConfigLoaded { config } => {
             format!(
-                "Config loaded - client: {}, speed: {}-{} kB/s",
-                config.client, config.min_upload_rate, config.max_upload_rate,
+                "Config loaded - client: {}, upload: {}-{} kB/s, download: {}-{} kB/s",
+                config.client,
+                config.min_upload_rate,
+                config.max_upload_rate,
+                config.min_download_rate,
+                config.max_download_rate,
             )
         }
     }

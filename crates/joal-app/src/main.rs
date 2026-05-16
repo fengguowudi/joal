@@ -10,7 +10,7 @@ use joal_core::config::{self, AppConfiguration, JoalFolders};
 use joal_core::events::EngineEvent;
 use joal_core::seed_manager::SeedManager;
 use joal_core::snapshot::EngineSnapshot;
-use joal_core::torrent::InfoHash;
+use joal_core::torrent::{InfoHash, TorrentStateStore};
 use tokio::runtime::Runtime;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{error, info, warn};
@@ -41,7 +41,12 @@ pub enum EngineCommand {
     Start,
     SaveConfig(AppConfiguration),
     DeleteTorrent(InfoHash),
+    SetTorrentInitialCompleted {
+        info_hash: InfoHash,
+        completed: bool,
+    },
     AddTorrent(PathBuf),
+    AnnounceAllNow,
     ListClients,
 }
 
@@ -138,7 +143,7 @@ fn main() -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JOAL Desktop")
-            .with_inner_size([1024.0, 720.0])
+            .with_inner_size([800.0, 600.0])
             .with_min_inner_size([640.0, 480.0]),
         ..Default::default()
     };
@@ -201,10 +206,49 @@ async fn command_handler(
             EngineCommand::DeleteTorrent(info_hash) => {
                 let guard = shared_sm.lock().await;
                 if let Some(sm) = guard.as_ref() {
-                    sm.delete_torrent(&info_hash).await;
+                    if let Err(e) = sm.delete_torrent(&info_hash).await {
+                        error!(
+                            target: "joal_app::cmd",
+                            error = %e,
+                            info_hash = %info_hash,
+                            "failed to clean torrent UI state on delete"
+                        );
+                        let _ = resp_tx
+                            .send(EngineResponse::Error(format!(
+                                "Failed to delete torrent state: {e}"
+                            )))
+                            .await;
+                    }
                 } else {
                     let _ = resp_tx
                         .send(EngineResponse::Error("Engine is not running".to_owned()))
+                        .await;
+                }
+            }
+            EngineCommand::SetTorrentInitialCompleted {
+                info_hash,
+                completed,
+            } => {
+                let guard = shared_sm.lock().await;
+                let result = if let Some(sm) = guard.as_ref() {
+                    sm.set_torrent_initial_completed(&info_hash, completed).await
+                } else {
+                    drop(guard);
+                    let store = TorrentStateStore::load(&folders).await;
+                    store.set_initial_completed(&info_hash, completed).await
+                };
+                if let Err(e) = result {
+                    error!(
+                        target: "joal_app::cmd",
+                        error = %e,
+                        info_hash = %info_hash,
+                        completed,
+                        "failed to persist torrent completed flag"
+                    );
+                    let _ = resp_tx
+                        .send(EngineResponse::Error(format!(
+                            "Failed to save torrent state: {e}"
+                        )))
                         .await;
                 }
             }
@@ -228,6 +272,16 @@ async fn command_handler(
                             "torrent file copied to torrents/"
                         );
                     }
+                }
+            }
+            EngineCommand::AnnounceAllNow => {
+                let guard = shared_sm.lock().await;
+                if let Some(sm) = guard.as_ref() {
+                    sm.announce_all_now();
+                } else {
+                    let _ = resp_tx
+                        .send(EngineResponse::Error("Engine is not running".to_owned()))
+                        .await;
                 }
             }
             EngineCommand::Stop => {

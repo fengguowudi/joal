@@ -26,6 +26,14 @@ pub fn show(
             ui.text_edit_singleline(&mut state.max_upload_rate);
             ui.end_row();
 
+            ui.label(t.min_download_rate);
+            ui.text_edit_singleline(&mut state.min_download_rate);
+            ui.end_row();
+
+            ui.label(t.max_download_rate);
+            ui.text_edit_singleline(&mut state.max_download_rate);
+            ui.end_row();
+
             ui.label(t.simultaneous_seed);
             ui.text_edit_singleline(&mut state.simultaneous_seed);
             ui.end_row();
