@@ -32,3 +32,6 @@ egui = { workspace = true }
 egui_extras = { workspace = true }
 egui_plot = { workspace = true }
 rfd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

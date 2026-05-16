@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod benchmark;
 mod config_panel;
 pub mod i18n;
 mod log_panel;
@@ -9,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
-use joal_core::config::{AppConfiguration, JoalFolders};
+use joal_core::config::{AppConfiguration, ConfigError, JoalFolders, UPLOAD_RATIO_TARGET_DISABLED};
 use joal_core::events::EngineEvent;
 use joal_core::snapshot::EngineSnapshot;
 use joal_core::torrent::InfoHash;
@@ -54,8 +56,13 @@ pub struct JoalApp {
     // Config editor state
     show_config_panel: bool,
     config_edit: ConfigEditState,
+    config_validation_errors: Vec<ConfigValidationIssue>,
+    config_operation_error: Option<String>,
+    config_notice: Option<ConfigNotice>,
+    config_apply_in_progress: bool,
     available_clients: Vec<String>,
     clients_requested: bool,
+    table_state: torrent_table::TableState,
 
     // Delete confirmation
     pending_delete: Option<DeleteConfirmation>,
@@ -76,6 +83,106 @@ struct ConfigEditState {
     keep_torrent_with_zero_leechers: bool,
     proxy_host: String,
     proxy_port: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigField {
+    MinUploadRate,
+    MaxUploadRate,
+    MinDownloadRate,
+    MaxDownloadRate,
+    SimultaneousSeed,
+    UploadRatioTarget,
+}
+
+impl ConfigField {
+    fn label(self, t: &i18n::Tr) -> &str {
+        match self {
+            Self::MinUploadRate => t.min_upload_rate,
+            Self::MaxUploadRate => t.max_upload_rate,
+            Self::MinDownloadRate => t.min_download_rate,
+            Self::MaxDownloadRate => t.max_download_rate,
+            Self::SimultaneousSeed => t.simultaneous_seed,
+            Self::UploadRatioTarget => t.upload_ratio_target,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigValidationIssue {
+    InvalidNumber(ConfigField),
+    InvalidPort,
+    ClientRequired,
+    ClientUnavailable,
+    ProxyPairRequired,
+    UploadRateRange,
+    DownloadRateRange,
+    SimultaneousSeedTooLow,
+    UploadRatioTargetInvalid,
+    Unexpected(String),
+}
+
+impl ConfigValidationIssue {
+    fn message(&self, t: &i18n::Tr) -> String {
+        match self {
+            Self::InvalidNumber(field) => format!("{} {}", field.label(t), t.config_invalid_number),
+            Self::InvalidPort => format!("{} {}", t.proxy_port, t.config_invalid_port),
+            Self::ClientRequired => t.config_client_required.to_owned(),
+            Self::ClientUnavailable => t.config_client_unavailable.to_owned(),
+            Self::ProxyPairRequired => t.config_proxy_pair_required.to_owned(),
+            Self::UploadRateRange => t.config_upload_rate_range.to_owned(),
+            Self::DownloadRateRange => t.config_download_rate_range.to_owned(),
+            Self::SimultaneousSeedTooLow => t.config_simultaneous_seed_positive.to_owned(),
+            Self::UploadRatioTargetInvalid => t.config_upload_ratio_invalid.to_owned(),
+            Self::Unexpected(message) => message.clone(),
+        }
+    }
+
+    fn from_config_error(error: ConfigError) -> Self {
+        match error {
+            ConfigError::Invalid(
+                "maxUploadRate must be greater than or equal to minUploadRate",
+            ) => Self::UploadRateRange,
+            ConfigError::Invalid(
+                "maxDownloadRate must be greater than or equal to minDownloadRate",
+            ) => Self::DownloadRateRange,
+            ConfigError::Invalid("simultaneousSeed must be greater than 0") => {
+                Self::SimultaneousSeedTooLow
+            }
+            ConfigError::Invalid("client is required, no file name given") => Self::ClientRequired,
+            ConfigError::Invalid("uploadRatioTarget must be greater than 0 (or equal to -1)") => {
+                Self::UploadRatioTargetInvalid
+            }
+            other => Self::Unexpected(other.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigNotice {
+    SavedAndRestarted,
+}
+
+impl ConfigNotice {
+    fn message(self, t: &i18n::Tr) -> &str {
+        match self {
+            Self::SavedAndRestarted => t.config_saved_restarted,
+        }
+    }
+}
+
+struct ParsedNumericConfig {
+    min_upload_rate: u64,
+    max_upload_rate: u64,
+    min_download_rate: u64,
+    max_download_rate: u64,
+    simultaneous_seed: u32,
+    upload_ratio_target: f32,
+}
+
+struct ParsedProxyConfig {
+    host: Option<String>,
+    port: Option<u16>,
 }
 
 impl ConfigEditState {
@@ -109,35 +216,186 @@ impl ConfigEditState {
         }
     }
 
-    fn to_config(&self) -> Option<AppConfiguration> {
-        let min_upload_rate = self.min_upload_rate.parse::<u64>().ok()?;
-        let max_upload_rate = self.max_upload_rate.parse::<u64>().ok()?;
-        let min_download_rate = self.min_download_rate.parse::<u64>().ok()?;
-        let max_download_rate = self.max_download_rate.parse::<u64>().ok()?;
-        let simultaneous_seed = self.simultaneous_seed.parse::<u32>().ok()?;
-        let upload_ratio_target = self.upload_ratio_target.parse::<f32>().ok()?;
-        let proxy_host = if self.proxy_host.trim().is_empty() {
-            None
-        } else {
-            Some(self.proxy_host.trim().to_owned())
+    fn validated_config(
+        &self,
+        available_clients: &[String],
+    ) -> Result<AppConfiguration, Vec<ConfigValidationIssue>> {
+        let mut errors = Vec::new();
+
+        let selected_client = self.validate_client_selection(available_clients, &mut errors);
+        let proxy = self.validate_proxy_settings(&mut errors);
+        let Some(numbers) = self.parse_numeric_config(&mut errors) else {
+            return Err(errors);
         };
-        let proxy_port = if self.proxy_port.trim().is_empty() {
-            None
-        } else {
-            self.proxy_port.trim().parse::<u16>().ok()
+
+        validate_numeric_ranges(&numbers, &mut errors);
+
+        let config = AppConfiguration {
+            min_upload_rate: numbers.min_upload_rate,
+            max_upload_rate: numbers.max_upload_rate,
+            min_download_rate: numbers.min_download_rate,
+            max_download_rate: numbers.max_download_rate,
+            simultaneous_seed: numbers.simultaneous_seed,
+            client: selected_client,
+            keep_torrent_with_zero_leechers: self.keep_torrent_with_zero_leechers,
+            upload_ratio_target: numbers.upload_ratio_target,
+            proxy_host: proxy.host,
+            proxy_port: proxy.port,
         };
-        Some(AppConfiguration {
+
+        if let Err(error) = config.validate() {
+            push_config_error(&mut errors, ConfigValidationIssue::from_config_error(error));
+        }
+
+        if errors.is_empty() {
+            Ok(config)
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn validate_client_selection(
+        &self,
+        available_clients: &[String],
+        errors: &mut Vec<ConfigValidationIssue>,
+    ) -> String {
+        let selected_client = self.selected_client.trim().to_owned();
+        if selected_client.is_empty() {
+            errors.push(ConfigValidationIssue::ClientRequired);
+        } else if !available_clients
+            .iter()
+            .any(|client| client == &selected_client)
+        {
+            errors.push(ConfigValidationIssue::ClientUnavailable);
+        }
+        selected_client
+    }
+
+    fn validate_proxy_settings(
+        &self,
+        errors: &mut Vec<ConfigValidationIssue>,
+    ) -> ParsedProxyConfig {
+        let proxy_host = self.proxy_host.trim().to_owned();
+        let proxy_port_text = self.proxy_port.trim();
+        let has_proxy_host = !proxy_host.is_empty();
+        let has_proxy_port = !proxy_port_text.is_empty();
+        if has_proxy_host != has_proxy_port {
+            errors.push(ConfigValidationIssue::ProxyPairRequired);
+        }
+
+        let port = if has_proxy_port {
+            match proxy_port_text.parse::<u16>() {
+                Ok(port) if port > 0 => Some(port),
+                _ => {
+                    errors.push(ConfigValidationIssue::InvalidPort);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        ParsedProxyConfig {
+            host: has_proxy_host.then_some(proxy_host),
+            port,
+        }
+    }
+
+    fn parse_numeric_config(
+        &self,
+        errors: &mut Vec<ConfigValidationIssue>,
+    ) -> Option<ParsedNumericConfig> {
+        let min_upload_rate =
+            parse_config_value::<u64>(&self.min_upload_rate, ConfigField::MinUploadRate, errors);
+        let max_upload_rate =
+            parse_config_value::<u64>(&self.max_upload_rate, ConfigField::MaxUploadRate, errors);
+        let min_download_rate = parse_config_value::<u64>(
+            &self.min_download_rate,
+            ConfigField::MinDownloadRate,
+            errors,
+        );
+        let max_download_rate = parse_config_value::<u64>(
+            &self.max_download_rate,
+            ConfigField::MaxDownloadRate,
+            errors,
+        );
+        let simultaneous_seed = parse_config_value::<u32>(
+            &self.simultaneous_seed,
+            ConfigField::SimultaneousSeed,
+            errors,
+        );
+        let upload_ratio_target = parse_config_value::<f32>(
+            &self.upload_ratio_target,
+            ConfigField::UploadRatioTarget,
+            errors,
+        );
+
+        let (
+            Some(min_upload_rate),
+            Some(max_upload_rate),
+            Some(min_download_rate),
+            Some(max_download_rate),
+            Some(simultaneous_seed),
+            Some(upload_ratio_target),
+        ) = (
             min_upload_rate,
             max_upload_rate,
             min_download_rate,
             max_download_rate,
             simultaneous_seed,
-            client: self.selected_client.clone(),
-            keep_torrent_with_zero_leechers: self.keep_torrent_with_zero_leechers,
             upload_ratio_target,
-            proxy_host,
-            proxy_port,
+        )
+        else {
+            return None;
+        };
+
+        Some(ParsedNumericConfig {
+            min_upload_rate,
+            max_upload_rate,
+            min_download_rate,
+            max_download_rate,
+            simultaneous_seed,
+            upload_ratio_target,
         })
+    }
+}
+
+fn validate_numeric_ranges(numbers: &ParsedNumericConfig, errors: &mut Vec<ConfigValidationIssue>) {
+    if numbers.max_upload_rate < numbers.min_upload_rate {
+        push_config_error(errors, ConfigValidationIssue::UploadRateRange);
+    }
+    if numbers.max_download_rate < numbers.min_download_rate {
+        push_config_error(errors, ConfigValidationIssue::DownloadRateRange);
+    }
+    if numbers.simultaneous_seed < 1 {
+        push_config_error(errors, ConfigValidationIssue::SimultaneousSeedTooLow);
+    }
+    if numbers.upload_ratio_target < 0.0
+        && numbers.upload_ratio_target != UPLOAD_RATIO_TARGET_DISABLED
+    {
+        push_config_error(errors, ConfigValidationIssue::UploadRatioTargetInvalid);
+    }
+}
+
+fn parse_config_value<T>(
+    value: &str,
+    field: ConfigField,
+    errors: &mut Vec<ConfigValidationIssue>,
+) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    if let Ok(parsed) = value.trim().parse::<T>() {
+        Some(parsed)
+    } else {
+        errors.push(ConfigValidationIssue::InvalidNumber(field));
+        None
+    }
+}
+
+fn push_config_error(errors: &mut Vec<ConfigValidationIssue>, issue: ConfigValidationIssue) {
+    if !errors.contains(&issue) {
+        errors.push(issue);
     }
 }
 
@@ -169,8 +427,13 @@ impl JoalApp {
             engine_running: true,
             show_config_panel: false,
             config_edit,
+            config_validation_errors: Vec::new(),
+            config_operation_error: None,
+            config_notice: None,
+            config_apply_in_progress: false,
             available_clients: Vec::new(),
             clients_requested: false,
+            table_state: torrent_table::TableState::default(),
             pending_delete: None,
             language: Language::default(),
         }
@@ -208,6 +471,9 @@ impl JoalApp {
                                 &self.current_snapshot,
                                 Some(config),
                             );
+                            self.config_validation_errors.clear();
+                            self.config_operation_error = None;
+                            self.config_apply_in_progress = false;
                         }
                         _ => {}
                     }
@@ -253,6 +519,12 @@ impl JoalApp {
                     self.events_rx = events_rx;
                     self.engine_running = true;
                 }
+                EngineResponse::ConfigApplied => {
+                    self.config_validation_errors.clear();
+                    self.config_operation_error = None;
+                    self.config_notice = Some(ConfigNotice::SavedAndRestarted);
+                    self.config_apply_in_progress = false;
+                }
                 EngineResponse::Error(msg) => {
                     self.log_buffer.push_back(LogEntry {
                         timestamp: Instant::now(),
@@ -260,6 +532,11 @@ impl JoalApp {
                     });
                     if self.log_buffer.len() > LOG_BUFFER_CAPACITY {
                         self.log_buffer.pop_front();
+                    }
+                    if self.config_apply_in_progress {
+                        self.config_apply_in_progress = false;
+                        self.config_notice = None;
+                        self.config_operation_error = Some(msg);
                     }
                 }
             }
@@ -298,32 +575,46 @@ impl eframe::App for JoalApp {
             status_bar::top_bar(ui, &self.current_snapshot, self.engine_running, t);
             ui.horizontal(|ui| {
                 // Start/Stop button
-                if self.engine_running {
-                    if ui
-                        .add(egui::Button::new(t.stop).min_size(egui::vec2(78.0, 0.0)))
-                        .clicked()
-                    {
+                let engine_toggle_clicked = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new("engine_toggle_button")),
+                        |ui| {
+                            if self.engine_running {
+                                ui.add(egui::Button::new(t.stop).min_size(egui::vec2(78.0, 0.0)))
+                                    .clicked()
+                            } else {
+                                ui.add(egui::Button::new(t.start).min_size(egui::vec2(78.0, 0.0)))
+                                    .clicked()
+                            }
+                        },
+                    )
+                    .inner;
+                if engine_toggle_clicked {
+                    if self.engine_running {
                         self.send_command(EngineCommand::Stop);
+                    } else {
+                        self.send_command(EngineCommand::Start);
                     }
-                } else if ui
-                    .add(egui::Button::new(t.start).min_size(egui::vec2(78.0, 0.0)))
-                    .clicked()
-                {
-                    self.send_command(EngineCommand::Start);
                 }
                 ui.separator();
                 // Config panel toggle
-                if ui
-                    .add(
-                        egui::Button::new(if self.show_config_panel {
-                            t.hide_config
-                        } else {
-                            t.config
-                        })
-                        .min_size(egui::vec2(96.0, 0.0)),
+                let config_toggle_clicked = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new("config_panel_toggle_button")),
+                        |ui| {
+                            ui.add(
+                                egui::Button::new(if self.show_config_panel {
+                                    t.hide_config
+                                } else {
+                                    t.config
+                                })
+                                .min_size(egui::vec2(96.0, 0.0)),
+                            )
+                            .clicked()
+                        },
                     )
-                    .clicked()
-                {
+                    .inner;
+                if config_toggle_clicked {
                     self.show_config_panel = !self.show_config_panel;
                     if self.show_config_panel {
                         self.send_command(EngineCommand::ListClients);
@@ -346,8 +637,7 @@ impl eframe::App for JoalApp {
                 if ui
                     .add_enabled(
                         self.engine_running,
-                        egui::Button::new(t.announce_all_now)
-                            .min_size(egui::vec2(142.0, 0.0)),
+                        egui::Button::new(t.announce_all_now).min_size(egui::vec2(142.0, 0.0)),
                     )
                     .clicked()
                 {
@@ -355,13 +645,19 @@ impl eframe::App for JoalApp {
                 }
                 ui.separator();
                 // Language toggle
-                if ui
-                    .add(
-                        egui::Button::new(self.language.toggle().label())
-                            .min_size(egui::vec2(60.0, 0.0)),
+                let language_toggle_clicked = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(egui::Id::new("language_toggle_button")),
+                        |ui| {
+                            ui.add(
+                                egui::Button::new(self.language.toggle().label())
+                                    .min_size(egui::vec2(60.0, 0.0)),
+                            )
+                            .clicked()
+                        },
                     )
-                    .clicked()
-                {
+                    .inner;
+                if language_toggle_clicked {
                     self.language = self.language.toggle();
                 }
             });
@@ -374,15 +670,45 @@ impl eframe::App for JoalApp {
         // Config side panel
         if self.show_config_panel {
             egui::Panel::right("config_panel")
-                .default_size(280.0)
+                .default_size(320.0)
+                .min_size(280.0)
+                .max_size(460.0)
+                .resizable(true)
                 .show_inside(ui, |ui| {
-                    config_panel::show(
+                    let action = config_panel::show(
                         ui,
                         &mut self.config_edit,
-                        &self.available_clients,
-                        &self.cmd_tx,
-                        t,
+                        config_panel::ConfigPanelView {
+                            validation_errors: &self.config_validation_errors,
+                            operation_error: self.config_operation_error.as_deref(),
+                            notice: self.config_notice,
+                            apply_in_progress: self.config_apply_in_progress,
+                            available_clients: &self.available_clients,
+                            t,
+                        },
                     );
+                    if action.edited {
+                        self.config_validation_errors.clear();
+                        self.config_operation_error = None;
+                        self.config_notice = None;
+                    }
+                    if action.apply_requested {
+                        match self.config_edit.validated_config(&self.available_clients) {
+                            Ok(config) => {
+                                self.config_validation_errors.clear();
+                                self.config_operation_error = None;
+                                self.config_notice = None;
+                                self.config_apply_in_progress = true;
+                                self.send_command(EngineCommand::ApplyConfig(config));
+                            }
+                            Err(errors) => {
+                                self.config_validation_errors = errors;
+                                self.config_operation_error = None;
+                                self.config_notice = None;
+                                self.config_apply_in_progress = false;
+                            }
+                        }
+                    }
                 });
         }
 
@@ -393,6 +719,7 @@ impl eframe::App for JoalApp {
             let name = confirm.name.clone();
             let hash = confirm.info_hash.clone();
             egui::Window::new(t.confirm_delete)
+                .id(egui::Id::new("delete_confirmation_window"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -418,40 +745,40 @@ impl eframe::App for JoalApp {
             self.pending_delete = None;
         }
 
+        egui::Panel::bottom("telemetry_panel")
+            .resizable(true)
+            .default_size(220.0)
+            .min_size(160.0)
+            .show_inside(ui, |ui| {
+                egui::Panel::bottom("log_panel")
+                    .resizable(true)
+                    .default_size(110.0)
+                    .min_size(80.0)
+                    .show_inside(ui, |ui| {
+                        log_panel::show(
+                            ui,
+                            &self.log_buffer,
+                            &mut self.log_auto_scroll,
+                            self.started_at,
+                            t,
+                        );
+                    });
+
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    speed_chart::show(ui, &self.speed_history, t);
+                });
+            });
+
         // Central content
         egui::CentralPanel::default_margins().show_inside(ui, |ui| {
-            let available = ui.available_height();
-            let table_height = (available * 0.70).max(200.0);
-            let chart_height = (available * 0.20).max(100.0);
-            let log_height = (available * 0.10).max(80.0);
-
-            ui.allocate_ui(egui::vec2(ui.available_width(), table_height), |ui| {
-                torrent_table::show(
-                    ui,
-                    &mut self.current_snapshot,
-                    &mut self.pending_delete,
-                    &self.cmd_tx,
-                    t,
-                );
-            });
-
-            ui.separator();
-
-            ui.allocate_ui(egui::vec2(ui.available_width(), chart_height), |ui| {
-                speed_chart::show(ui, &self.speed_history, t);
-            });
-
-            ui.separator();
-
-            ui.allocate_ui(egui::vec2(ui.available_width(), log_height), |ui| {
-                log_panel::show(
-                    ui,
-                    &self.log_buffer,
-                    &mut self.log_auto_scroll,
-                    self.started_at,
-                    t,
-                );
-            });
+            torrent_table::show(
+                ui,
+                &mut self.current_snapshot,
+                &mut self.pending_delete,
+                &self.cmd_tx,
+                &mut self.table_state,
+                t,
+            );
         });
     }
 }
@@ -509,5 +836,84 @@ fn format_event(event: &EngineEvent) -> String {
                 config.max_download_rate,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_state() -> ConfigEditState {
+        ConfigEditState {
+            min_upload_rate: "30".to_owned(),
+            max_upload_rate: "170".to_owned(),
+            min_download_rate: "0".to_owned(),
+            max_download_rate: "0".to_owned(),
+            simultaneous_seed: "5".to_owned(),
+            upload_ratio_target: "-1.0".to_owned(),
+            selected_client: "utorrent-3.5.0_43916.client".to_owned(),
+            keep_torrent_with_zero_leechers: true,
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+        }
+    }
+
+    #[test]
+    fn validated_config_reports_parse_and_proxy_errors() {
+        let mut state = base_state();
+        state.simultaneous_seed = "abc".to_owned();
+        state.proxy_host = "127.0.0.1".to_owned();
+
+        let errors = state
+            .validated_config(&["utorrent-3.5.0_43916.client".to_owned()])
+            .unwrap_err();
+
+        assert!(errors.contains(&ConfigValidationIssue::InvalidNumber(
+            ConfigField::SimultaneousSeed,
+        )));
+        assert!(errors.contains(&ConfigValidationIssue::ProxyPairRequired));
+    }
+
+    #[test]
+    fn validated_config_rejects_unavailable_client() {
+        let state = base_state();
+        let errors = state
+            .validated_config(&["qbittorrent-4.5.0.client".to_owned()])
+            .unwrap_err();
+
+        assert!(errors.contains(&ConfigValidationIssue::ClientUnavailable));
+    }
+
+    #[test]
+    fn validated_config_collects_range_and_ratio_errors() {
+        let mut state = base_state();
+        state.min_upload_rate = "200".to_owned();
+        state.max_upload_rate = "150".to_owned();
+        state.min_download_rate = "10".to_owned();
+        state.max_download_rate = "5".to_owned();
+        state.upload_ratio_target = "-0.5".to_owned();
+
+        let errors = state
+            .validated_config(&["utorrent-3.5.0_43916.client".to_owned()])
+            .unwrap_err();
+
+        assert!(errors.contains(&ConfigValidationIssue::UploadRateRange));
+        assert!(errors.contains(&ConfigValidationIssue::DownloadRateRange));
+        assert!(errors.contains(&ConfigValidationIssue::UploadRatioTargetInvalid));
+    }
+
+    #[test]
+    fn validated_config_builds_trimmed_proxy_config() {
+        let mut state = base_state();
+        state.proxy_host = " 127.0.0.1 ".to_owned();
+        state.proxy_port = " 8080 ".to_owned();
+
+        let config = state
+            .validated_config(&["utorrent-3.5.0_43916.client".to_owned()])
+            .unwrap();
+
+        assert_eq!(config.proxy_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(config.proxy_port, Some(8080));
+        assert_eq!(config.client, "utorrent-3.5.0_43916.client");
     }
 }

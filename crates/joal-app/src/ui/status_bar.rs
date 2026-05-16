@@ -3,6 +3,17 @@ use joal_core::snapshot::EngineSnapshot;
 use super::i18n::Tr;
 
 pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
+    let attention_count = snapshot
+        .torrents
+        .iter()
+        .filter(|torrent| torrent.consecutive_fails > 0 || torrent.last_known_leechers == Some(0))
+        .count();
+    let zero_leecher_count = snapshot
+        .torrents
+        .iter()
+        .filter(|torrent| torrent.last_known_leechers == Some(0))
+        .count();
+
     ui.horizontal(|ui| {
         // Engine status indicator
         if engine_running {
@@ -16,7 +27,10 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
                 .strong(),
         );
         ui.separator();
-        ui.label(format!("▲: {}", format_speed(snapshot.global_upload_speed_bps)));
+        ui.label(format!(
+            "▲: {}",
+            format_speed(snapshot.global_upload_speed_bps)
+        ));
         ui.separator();
         ui.label(format!(
             "▼: {}",
@@ -24,6 +38,10 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
         ));
         ui.separator();
         ui.label(format!("{}: {}", t.torrents, snapshot.torrents.len()));
+        ui.separator();
+        ui.label(format!("{}: {}", t.attention, attention_count));
+        ui.separator();
+        ui.label(format!("{}: {}", t.zero_leechers, zero_leecher_count));
     });
 }
 
