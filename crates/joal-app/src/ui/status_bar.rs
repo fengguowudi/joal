@@ -14,94 +14,112 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
         .filter(|torrent| torrent.last_known_leechers == Some(0))
         .count();
 
-    ui.horizontal_wrapped(|ui| {
-        theme::badge(
-            ui,
-            "engine_state",
-            if engine_running { t.running } else { t.stopped },
-            if engine_running {
-                theme::Tone::Success
-            } else {
-                theme::Tone::Danger
-            },
-        );
-        theme::metric(
-            ui,
-            "active_client",
-            t.client,
-            &snapshot.active_client_filename,
-            theme::Tone::Neutral,
-        );
-        theme::metric(
-            ui,
-            "global_upload_speed",
-            "▲",
-            format_speed(snapshot.global_upload_speed_bps),
-            theme::Tone::Accent,
-        );
-        theme::metric(
-            ui,
-            "global_download_speed",
-            "▼",
-            format_speed(snapshot.global_download_speed_bps),
-            theme::Tone::Info,
-        );
-        theme::metric(
-            ui,
-            "torrent_count",
-            t.torrents,
-            snapshot.torrents.len(),
-            theme::Tone::Neutral,
-        );
-        theme::metric(
-            ui,
-            "attention_count",
-            t.attention,
-            attention_count,
-            if attention_count > 0 {
-                theme::Tone::Warning
-            } else {
-                theme::Tone::Success
-            },
-        );
-        theme::metric(
-            ui,
-            "zero_leechers_count",
-            t.zero_leechers,
-            zero_leecher_count,
-            if zero_leecher_count > 0 {
-                theme::Tone::Warning
-            } else {
-                theme::Tone::Neutral
-            },
-        );
+    theme::panel_frame().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            theme::badge(
+                ui,
+                "engine_state",
+                if engine_running { t.running } else { t.stopped },
+                if engine_running {
+                    theme::Tone::Success
+                } else {
+                    theme::Tone::Danger
+                },
+            );
+            theme::metric(
+                ui,
+                "global_upload_speed",
+                "▲",
+                format_speed(snapshot.global_upload_speed_bps),
+                theme::Tone::Accent,
+            );
+            theme::metric(
+                ui,
+                "global_download_speed",
+                "▼",
+                format_speed(snapshot.global_download_speed_bps),
+                theme::Tone::Info,
+            );
+            theme::metric(
+                ui,
+                "torrent_count",
+                t.torrents,
+                snapshot.torrents.len(),
+                theme::Tone::Neutral,
+            );
+            theme::metric(
+                ui,
+                "attention_count",
+                t.attention,
+                attention_count,
+                if attention_count > 0 {
+                    theme::Tone::Warning
+                } else {
+                    theme::Tone::Success
+                },
+            );
+            theme::metric(
+                ui,
+                "zero_leechers_count",
+                t.zero_leechers,
+                zero_leecher_count,
+                if zero_leecher_count > 0 {
+                    theme::Tone::Warning
+                } else {
+                    theme::Tone::Neutral
+                },
+            );
+        });
+        ui.add_space(6.0);
+        ui.push_id("active_client_strip", |ui| {
+            theme::inset_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(t.client)
+                            .small()
+                            .color(theme::text_secondary()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&snapshot.active_client_filename)
+                                .strong()
+                                .color(theme::text_primary()),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&snapshot.active_client_filename);
+                });
+            });
+        });
     });
 }
 
 pub fn bottom_bar(ui: &mut egui::Ui, started_at: std::time::Instant, engine_running: bool, t: &Tr) {
-    ui.horizontal_wrapped(|ui| {
-        let elapsed = started_at.elapsed().as_secs();
-        let h = elapsed / 3600;
-        let m = (elapsed % 3600) / 60;
-        let s = elapsed % 60;
+    theme::panel_frame().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let elapsed = started_at.elapsed().as_secs();
+            let h = elapsed / 3600;
+            let m = (elapsed % 3600) / 60;
+            let s = elapsed % 60;
 
-        theme::badge(
-            ui,
-            "engine_status_footer",
-            if engine_running { t.running } else { t.stopped },
-            if engine_running {
-                theme::Tone::Success
-            } else {
-                theme::Tone::Danger
-            },
-        );
-        theme::metric(
-            ui,
-            "uptime_footer",
-            t.uptime,
-            format!("{h:02}:{m:02}:{s:02}"),
-            theme::Tone::Neutral,
-        );
+            theme::badge(
+                ui,
+                "engine_status_footer",
+                if engine_running { t.running } else { t.stopped },
+                if engine_running {
+                    theme::Tone::Success
+                } else {
+                    theme::Tone::Danger
+                },
+            );
+            theme::metric(
+                ui,
+                "uptime_footer",
+                t.uptime,
+                format!("{h:02}:{m:02}:{s:02}"),
+                theme::Tone::Neutral,
+            );
+        });
     });
 }
 

@@ -855,8 +855,10 @@ fn toolbar_action(
     button: egui::Button<'_>,
     min_width: f32,
 ) -> egui::Response {
-    ui.push_id(id, |ui| ui.add_sized([min_width, 30.0], button))
-        .inner
+    ui.push_id(id, |ui| {
+        ui.add(button.min_size(egui::vec2(min_width, 30.0)))
+    })
+    .inner
 }
 
 fn toolbar_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui::Button<'_> {
@@ -870,9 +872,10 @@ fn toolbar_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui::Bu
     } else {
         theme::text_primary()
     }))
+    .truncate()
     .fill(palette.bg)
     .stroke(egui::Stroke::new(1.0, palette.stroke))
-    .corner_radius(egui::CornerRadius::same(6))
+    .corner_radius(egui::CornerRadius::same(5))
     .selected(highlighted)
     .frame_when_inactive(true)
 }

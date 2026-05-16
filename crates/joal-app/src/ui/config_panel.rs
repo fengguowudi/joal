@@ -64,7 +64,7 @@ pub fn show(
                 )
                 .fill(accent.bg)
                 .stroke(egui::Stroke::new(1.0, accent.stroke))
-                .corner_radius(egui::CornerRadius::same(6))
+                .corner_radius(egui::CornerRadius::same(5))
                 .min_size(egui::vec2(ui.available_width().max(180.0), 34.0)),
             )
         })
@@ -127,7 +127,8 @@ fn show_config_grid(
 
             field_label(ui, t.client_label);
             egui::ComboBox::from_id_salt("client_combo")
-                .width(170.0)
+                .width(178.0)
+                .truncate()
                 .selected_text(&state.selected_client)
                 .show_ui(ui, |ui| {
                     for client in available_clients {
@@ -229,6 +230,6 @@ fn config_text_field<'a>(
     ui.add(
         egui::TextEdit::singleline(value)
             .id_salt(id)
-            .desired_width(132.0),
+            .desired_width(148.0),
     )
 }

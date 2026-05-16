@@ -98,7 +98,7 @@ pub fn show(
             );
             let attention_response = ui
                 .push_id("torrent_table_attention_toggle", |ui| {
-                    ui.add_sized([150.0, 30.0], attention_toggle)
+                    ui.add(attention_toggle.min_size(egui::vec2(136.0, 30.0)))
                 })
                 .inner
                 .on_hover_text(t.attention_hint);
@@ -150,7 +150,7 @@ pub fn show(
         .min_scrolled_height(available_height)
         .max_scroll_height(available_height)
         .column(egui_extras::Column::remainder().at_least(220.0)) // Name
-        .column(egui_extras::Column::initial(120.0).at_least(120.0)) // Progress
+        .column(egui_extras::Column::initial(124.0).at_least(120.0)) // Progress
         .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Upload speed
         .column(egui_extras::Column::initial(92.0).at_least(84.0)) // Uploaded
         .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Download speed
@@ -158,8 +158,8 @@ pub fn show(
         .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Seeders
         .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Leechers
         .column(egui_extras::Column::initial(128.0).at_least(118.0)) // Last announce
-        .column(egui_extras::Column::remainder().at_least(180.0)) // Health
-        .column(egui_extras::Column::initial(176.0).at_least(164.0)) // Actions
+        .column(egui_extras::Column::remainder().at_least(190.0)) // Health
+        .column(egui_extras::Column::initial(206.0).at_least(192.0)) // Actions
         .header(text_height + 8.0, |mut header| {
             sortable_header(&mut header, table_state, SortColumn::Name, t.col_name);
             sortable_header(
@@ -218,17 +218,25 @@ pub fn show(
                 row.col(|ui| {
                     cell_scope(ui, row_index, "name", |ui| {
                         ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(&torrent.name)
-                                    .strong()
-                                    .color(theme::text_primary()),
-                            );
-                            ui.label(
-                                egui::RichText::new(short_hash(torrent))
-                                    .monospace()
-                                    .small()
-                                    .color(theme::text_secondary()),
-                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&torrent.name)
+                                        .strong()
+                                        .color(theme::text_primary()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&torrent.name);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(short_hash(torrent))
+                                        .monospace()
+                                        .small()
+                                        .color(theme::text_secondary()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(torrent.info_hash.to_string());
                         });
                     });
                 });
@@ -243,8 +251,8 @@ pub fn show(
                         ui.add(
                             egui::ProgressBar::new(progress as f32)
                                 .desired_width(ui.available_width())
-                                .fill(theme::tone_colors(tone).bg)
-                                .corner_radius(egui::CornerRadius::same(6))
+                                .fill(theme::tone_colors(tone).stroke)
+                                .corner_radius(egui::CornerRadius::same(5))
                                 .text(progress_text(torrent)),
                         );
                     });
@@ -282,11 +290,14 @@ pub fn show(
                 row.col(|ui| {
                     cell_scope(ui, row_index, "announce_meta", |ui| {
                         ui.vertical(|ui| {
-                            ui.label(last_announce_text(torrent, t));
-                            ui.label(
-                                egui::RichText::new(interval_text(torrent, t))
-                                    .small()
-                                    .color(theme::text_secondary()),
+                            ui.add(egui::Label::new(last_announce_text(torrent, t)).truncate());
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(interval_text(torrent, t))
+                                        .small()
+                                        .color(theme::text_secondary()),
+                                )
+                                .truncate(),
                             );
                         });
                     });
@@ -299,6 +310,7 @@ pub fn show(
                 row.col(|ui| {
                     cell_scope(ui, row_index, "actions", |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             let mark_label = if torrent.initial_completed {
                                 t.action_marked_complete
                             } else {
@@ -306,13 +318,13 @@ pub fn show(
                             };
                             let response = ui
                                 .push_id("mark_completed", |ui| {
-                                    ui.add_sized(
-                                        [108.0, 24.0],
+                                    ui.add(
                                         row_action_button(
                                             mark_label,
                                             theme::Tone::Success,
                                             torrent.initial_completed,
-                                        ),
+                                        )
+                                        .min_size(egui::vec2(88.0, 24.0)),
                                     )
                                 })
                                 .inner
@@ -328,13 +340,13 @@ pub fn show(
 
                             if ui
                                 .push_id("archive_torrent", |ui| {
-                                    ui.add_sized(
-                                        [74.0, 24.0],
+                                    ui.add(
                                         row_action_button(
                                             t.action_archive,
                                             theme::Tone::Danger,
                                             true,
-                                        ),
+                                        )
+                                        .min_size(egui::vec2(68.0, 24.0)),
                                     )
                                 })
                                 .inner
@@ -484,9 +496,10 @@ fn sortable_header(
                         if active {
                             theme::tone_colors(theme::Tone::Accent).fg
                         } else {
-                            theme::text_primary()
+                            theme::text_secondary()
                         },
                     ))
+                    .truncate()
                     .fill(
                         theme::tone_colors(if active {
                             theme::Tone::Accent
@@ -504,7 +517,7 @@ fn sortable_header(
                         })
                         .stroke,
                     ))
-                    .corner_radius(egui::CornerRadius::same(6))
+                    .corner_radius(egui::CornerRadius::same(5))
                     .selected(active)
                     .frame_when_inactive(true),
                 )
@@ -532,11 +545,15 @@ fn health_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus, t: 
 
     ui.vertical(|ui| {
         theme::badge(ui, (row_index, "health_badge"), label, tone);
-        ui.label(
-            egui::RichText::new(health_detail(torrent, t))
-                .small()
-                .color(theme::text_secondary()),
-        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(health_detail(torrent, t))
+                    .small()
+                    .color(theme::text_secondary()),
+            )
+            .truncate(),
+        )
+        .on_hover_text(health_detail(torrent, t));
     });
 }
 
@@ -634,9 +651,10 @@ fn table_filter_button(label: &str, tone: theme::Tone, selected: bool) -> egui::
     } else {
         theme::text_primary()
     }))
+    .truncate()
     .fill(palette.bg)
     .stroke(egui::Stroke::new(1.0, palette.stroke))
-    .corner_radius(egui::CornerRadius::same(6))
+    .corner_radius(egui::CornerRadius::same(5))
     .selected(selected)
     .frame_when_inactive(true)
 }
@@ -652,9 +670,10 @@ fn row_action_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui:
     } else {
         theme::text_primary()
     }))
+    .truncate()
     .fill(palette.bg)
     .stroke(egui::Stroke::new(1.0, palette.stroke))
-    .corner_radius(egui::CornerRadius::same(6))
+    .corner_radius(egui::CornerRadius::same(5))
     .selected(highlighted)
     .frame_when_inactive(true)
 }
