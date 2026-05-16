@@ -251,13 +251,11 @@ impl ClientNotifier {
         outcome: &AnnounceOutcome,
     ) {
         match (event, outcome) {
-            (RequestEvent::Started, AnnounceOutcome::Success(r))
-                if r.seeders() < 1 || r.leechers() < 1 =>
-            {
+            (RequestEvent::Started, AnnounceOutcome::Success(r)) if r.leechers() < 1 => {
                 self.control.on_no_more_peers(announcer.torrent_info_hash());
             }
             (RequestEvent::None, AnnounceOutcome::Success(r)) => {
-                if r.seeders() < 1 || r.leechers() < 1 {
+                if r.leechers() < 1 {
                     self.control.on_no_more_peers(announcer.torrent_info_hash());
                     return;
                 }
@@ -367,8 +365,17 @@ fn seconds(n: i32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use crate::announcer::AnnounceRequest;
-    use crate::torrent::InfoHash;
+    use crate::announcer::{
+        AnnounceDataAccessor, Announcer, TrackerClient, TrackerClientUriProvider,
+    };
+    use crate::bandwidth::{BandwidthDispatcher, DownloadSpeedProvider, RandomSpeedProvider};
+    use crate::client::{BitTorrentClient, BitTorrentClientConfig, ConnectionHandler};
+    use crate::config::AppConfiguration;
+    use crate::torrent::{InfoHash, MockedTorrent};
 
     fn ih(x: u8) -> InfoHash {
         let mut bytes = [0u8; 20];
@@ -386,5 +393,121 @@ mod tests {
     #[test]
     fn dispatcher_notifier_clamps_negative_peer_counts() {
         let _ = AnnounceRequest::create_regular(ih(1));
+    }
+
+    #[derive(Default)]
+    struct RecordingControl {
+        no_more_peers_calls: AtomicUsize,
+        seen_hashes: Mutex<Vec<InfoHash>>,
+    }
+
+    impl RecordingControl {
+        fn saw_no_more_peers_for(&self, expected: &InfoHash) -> bool {
+            self.seen_hashes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|seen| seen == expected)
+        }
+    }
+
+    impl OrchestratorControl for RecordingControl {
+        fn resolve_announcer(&self, _info_hash: &InfoHash) -> Option<Arc<Announcer>> {
+            None
+        }
+
+        fn on_too_many_failed(&self, _info_hash: &InfoHash) {}
+
+        fn on_upload_ratio_limit_reached(&self, _info_hash: &InfoHash) {}
+
+        fn on_no_more_peers(&self, info_hash: &InfoHash) {
+            self.no_more_peers_calls.fetch_add(1, Ordering::SeqCst);
+            self.seen_hashes.lock().unwrap().push(info_hash.clone());
+        }
+
+        fn on_torrent_has_stopped(&self, _info_hash: &InfoHash) {}
+    }
+
+    fn announcer_for_tests() -> Arc<Announcer> {
+        let torrent = MockedTorrent {
+            info_hash: ih(9),
+            name: "response-handler-test".to_owned(),
+            total_size: 1_024,
+            piece_length: 512,
+            piece_count: 2,
+            announce: "http://127.0.0.1:1/announce".to_owned(),
+            announce_tiers: Vec::new(),
+        };
+        let cfg = AppConfiguration {
+            min_upload_rate: 0,
+            max_upload_rate: 0,
+            min_download_rate: 0,
+            max_download_rate: 0,
+            simultaneous_seed: 1,
+            client: "qbittorrent-4.5.0.client".into(),
+            keep_torrent_with_zero_leechers: true,
+            upload_ratio_target: -1.0,
+            proxy_host: None,
+            proxy_port: None,
+        };
+        let bandwidth = Arc::new(BandwidthDispatcher::new(
+            Duration::from_millis(100),
+            RandomSpeedProvider::new(&cfg),
+            DownloadSpeedProvider::new(&cfg),
+        ));
+        bandwidth.register_torrent(torrent.info_hash.clone(), torrent.total_size, false);
+
+        let client_json = include_str!("../../../../resources/clients/qbittorrent-4.5.0.client");
+        let client_cfg = BitTorrentClientConfig::try_from(client_json).unwrap();
+        let client = Arc::new(BitTorrentClient::new(client_cfg).unwrap());
+        let accessor = AnnounceDataAccessor::new(
+            client,
+            bandwidth,
+            Arc::new(ConnectionHandler::with_port_only(51413)),
+        );
+        let provider =
+            TrackerClientUriProvider::new(vec!["http://127.0.0.1:1/announce".to_owned()]).unwrap();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        Arc::new(Announcer::new(
+            torrent,
+            TrackerClient::with_http_client(provider, http),
+            accessor,
+            -1.0,
+        ))
+    }
+
+    #[test]
+    fn started_success_with_zero_seeders_but_positive_leechers_does_not_trigger_no_more_peers() {
+        let control = Arc::new(RecordingControl::default());
+        let notifier = ClientNotifier::new(control.clone() as Arc<dyn OrchestratorControl>);
+        let announcer = announcer_for_tests();
+
+        notifier.on_announce_result(
+            &announcer,
+            RequestEvent::Started,
+            &AnnounceOutcome::Success(SuccessAnnounceResponse::new(900, 0, 3)),
+        );
+
+        assert_eq!(control.no_more_peers_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn regular_success_with_zero_leechers_triggers_no_more_peers() {
+        let control = Arc::new(RecordingControl::default());
+        let notifier = ClientNotifier::new(control.clone() as Arc<dyn OrchestratorControl>);
+        let announcer = announcer_for_tests();
+        let info_hash = announcer.torrent_info_hash().clone();
+
+        notifier.on_announce_result(
+            &announcer,
+            RequestEvent::None,
+            &AnnounceOutcome::Success(SuccessAnnounceResponse::new(900, 0, 0)),
+        );
+
+        assert_eq!(control.no_more_peers_calls.load(Ordering::SeqCst), 1);
+        assert!(control.saw_no_more_peers_for(&info_hash));
     }
 }
