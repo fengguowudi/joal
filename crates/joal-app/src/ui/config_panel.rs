@@ -23,7 +23,6 @@ pub fn show(
 ) -> ConfigPanelAction {
     let t = view.t;
     let mut edited = false;
-    let accent = theme::tone_colors(theme::Tone::Accent);
 
     ui.heading(
         egui::RichText::new(t.configuration)
@@ -48,28 +47,20 @@ pub fn show(
     ui.label(
         egui::RichText::new(t.tip_ratio)
             .small()
-            .color(theme::text_secondary()),
+            .color(theme::text_tertiary()),
     );
     ui.add_space(8.0);
     show_feedback(ui, &view);
 
-    let apply_requested = ui
-        .push_id("config_apply_button", |ui| {
-            ui.add_enabled(
-                !view.apply_in_progress,
-                egui::Button::new(
-                    egui::RichText::new(t.save_and_restart)
-                        .strong()
-                        .color(accent.fg),
-                )
-                .fill(accent.bg)
-                .stroke(egui::Stroke::new(1.0, accent.stroke))
-                .corner_radius(egui::CornerRadius::same(5))
-                .min_size(egui::vec2(ui.available_width().max(180.0), 34.0)),
-            )
-        })
-        .inner
-        .clicked();
+    let apply_width = ui.available_width().max(180.0);
+    let apply_requested = theme::primary_button_enabled(
+        ui,
+        "config_apply_button",
+        t.save_and_restart,
+        egui::vec2(apply_width, 34.0),
+        !view.apply_in_progress,
+    )
+    .clicked();
 
     ConfigPanelAction {
         apply_requested,

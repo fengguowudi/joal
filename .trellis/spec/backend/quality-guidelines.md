@@ -367,3 +367,92 @@ egui::ComboBox::from_id_salt("client_combo")
 - Shortening every translation avoids the immediate overflow but forces copy compromises into the i18n layer.
 - Letting controls wrap vertically inside dense toolbars/tables makes row heights unstable and harms scanability.
 - `min_size + truncate + hover` keeps the layout predictable across locales without hiding the full value from the operator.
+
+### Convention: desktop UI is a borderless light theme — fills, not strokes, carry hierarchy
+
+**What**: `joal-app` follows a "white on off-white" visual system. Surfaces are separated by fill contrast, not by 1px borders. Every `Stroke` on a content frame, badge, metric, button face, or tone-tinted block is `Color32::TRANSPARENT` (or `Stroke::NONE`); the only strokes that remain are the deliberately faint `widgets.inactive.bg_stroke` on default buttons and a near-invisible `window_stroke`.
+
+**Why**:
+- The previous incarnation drew a 1px tinted border around every container (status badges, metrics, the speed chart, the log panel, table rows). The result read like a spreadsheet — visually fragmented, low contrast, no focal point. Removing the borders and letting `theme::app_background()` (`#F4F6F8`) sit behind `theme::surface()` (`#FFFFFF`) made the table-as-hero layout legible at a glance.
+- Future contributors will reflexively reach for `Stroke::new(1.0, ...)` to "improve separation". This regresses the entire visual system and should be caught in review.
+
+**Fix (convention)**:
+- All `Frame` helpers in `crates/joal-app/src/ui/theme.rs` (`panel_frame`, `inset_frame`, `tone_frame`, `badge`, `metric`) MUST use `Stroke::NONE`. Do not add `.stroke(Stroke::new(...))` to any new frame helper in this crate.
+- Every `Tone` in `tone_colors(...)` keeps `stroke: Color32::TRANSPARENT`. The stroke field stays in `ToneColors` so callers can still type the struct, but its value must remain transparent.
+- Corner radii are quantised to three values via the module constants `CR_BADGE = 4`, `CR_INSET = 6`, `CR_PANEL = 8`. Don't introduce new radii (the pre-rewrite code mixed 5 and 8 — don't go back). Use `CR_BADGE` for pills/chips, `CR_INSET` for inset surfaces / default widgets / `metric`-style cards, `CR_PANEL` for the outer cards that frame whole sections.
+- Text uses a strict three-tier gray hierarchy from `theme.rs`:
+  - `text_primary()` (`#111827`, near-black) — names, numbers, percentages, anything the operator scans for.
+  - `text_secondary()` (`#6B7280`, mid-gray) — column headers, body copy, badge captions, secondary speeds.
+  - `text_tertiary()` (`#9CA3AF`, light-gray) — timestamps, client filenames, log lines, "last announced" hints. Anything the operator should not focus on.
+- Do not hard-code `Color32::BLACK` / `Color32::GRAY` / `Color32::from_rgb(...)` for text. Always go through the three accessors so theme tweaks stay centralised.
+- `Tone` semantic roles are fixed:
+  - `Success` — healthy / running / mark-as-completed.
+  - `Danger` — destructive / stop / delete (use only when the action is irreversible or stops the engine).
+  - `Warning` — attention required (zero-leecher torrents, recoverable issues).
+  - `Info` — pending / informational.
+  - `Accent` — upload/highlight + the visual ancestor of the primary button.
+  - `Neutral` — default chrome; not for state.
+  - Don't repurpose `Warning` for a stop button or `Danger` for "pending"; the operator's mental model depends on the colour-to-meaning mapping.
+
+**Anti-patterns**:
+- Adding `Stroke::new(1.0, theme::border())` (or any non-transparent stroke) to a new frame "for clarity". The fix is `fill` contrast, not a border.
+- Introducing a fourth corner radius value because the existing three "don't quite fit". The fit is intentional; pick the closest.
+- Reaching past the text accessors into `Color32::from_rgb(...)` for body copy. If you need a new shade, add it as a typed accessor in `theme.rs` and use it everywhere.
+
+### Convention: desktop UI buttons go through `theme::primary_button` / `secondary_button` / `tone_button`
+
+**What**: `crates/joal-app/src/ui/theme.rs` exposes a button family (`primary_button`, `secondary_button`, `tone_button`, plus `_enabled` variants for disabled-aware controls). New UI code in this crate calls one of these helpers; raw `ui.add(egui::Button::new(...))` is reserved for legacy paths still being migrated.
+
+**Why**:
+- The helpers enforce three invariants in one place: (a) the `push_id` wrapping required by `Convention: egui discarded-pass UI must pin widget ids explicitly`, (b) `Button::min_size(...)` instead of `add_sized` per `Convention: localized egui controls must not hard-code label width`, and (c) the visual hierarchy that distinguishes the primary action from secondary chrome. Bypassing the helpers re-introduces all three regression classes at once.
+- The button visual hierarchy is meaningful, not cosmetic. `primary_button` is reserved for the **single most important action on its surface** (Add Torrent on the top bar, Save & Restart on the config panel). Two primary buttons on the same surface defeats the focal-point logic entirely.
+
+**Fix (convention)**:
+- Prefer `theme::primary_button(ui, id, label)` for a surface's single primary action. If a panel needs two equally-weighted primary actions, redesign the panel — don't double up the styling.
+- `theme::secondary_button(ui, id, label)` is the default for everything else: cancel, toggle, navigation. It auto-picks up the borderless `widgets.inactive` style.
+- `theme::tone_button(ui, id, label, tone)` is the right choice when the action carries semantic colour: `Tone::Danger` for delete confirmation, `Tone::Success` for "start engine", `Tone::Warning` for "mark as zero-leecher", etc. Use this instead of writing a one-off `Button::fill(...)` block.
+- For controls that need to be disabled when invalid, use the `_enabled(ui, id, label, enabled)` variant. Do not wrap a normal helper in `ui.add_enabled_ui(...)` — the helpers already handle the disabled visuals and keep the `push_id` path consistent.
+- When introducing a new button helper, mirror the existing pattern: `push_id` outer wrapper → `Button::min_size(egui::vec2(min_width, 30.0))` → optional `.truncate()` for translated labels → return the inner `Response`. Do NOT use `ui.add_sized(...)`.
+
+**Anti-patterns**:
+- Calling `ui.add(egui::Button::new("..."))` in new code under `crates/joal-app/src/ui/`. Even if the label looks short and English, it will end up translated and will lose `push_id` protection.
+- Painting a "fake primary" with `Button::fill(theme::accent())` instead of using `primary_button`. The helper exists precisely to keep the primary-button look in one place; ad-hoc copies drift.
+- Putting more than one `primary_button` on the same panel/dialog. The visual contract is "one primary action per surface".
+
+### Convention: hero surface owns `CentralPanel`; auxiliaries are resizable `TopBottomPanel`s in strict order
+
+**What**: The desktop layout in `crates/joal-app/src/ui/mod.rs` follows a fixed Panel order so the torrent table — the app's hero surface — automatically claims all remaining vertical space:
+
+```rust
+// 1. Top: status + action buttons + table toolbar — content-sized, no resizable
+egui::TopBottomPanel::top("top_panel").show(ctx, |ui| { /* ... */ });
+
+// 2. Bottom telemetry (speed chart + log): resizable with explicit bounds
+egui::TopBottomPanel::bottom("telemetry_panel")
+    .resizable(true)
+    .default_height(150.0)
+    .height_range(110.0..=320.0)
+    .show(ctx, |ui| { /* ... */ });
+
+// 3. (optional) Footer status strip: exact height, NOT resizable
+egui::TopBottomPanel::bottom("footer_status").exact_height(24.0).show(ctx, |ui| { /* ... */ });
+
+// 4. Central: the torrent table (hero) — claims everything left
+egui::CentralPanel::default().show(ctx, |ui| { /* torrent_table::show(...) */ });
+```
+
+**Why**:
+- egui assigns space to panels in the order they are registered, and `CentralPanel` takes whatever is left. Declaring `CentralPanel` first or burying the table inside a `BottomPanel` collapses the table to whatever min-size the inner content reports — exactly the symptom the layout rewrite was undoing (PRD: "main UI layout exposes a larger primary table area").
+- The PRD also requires "adjustable panes rather than fixed percentages". `resizable(true) + default_height + height_range` is the contract that satisfies it: the user gets a sensible default and can drag the divider, but the bounds prevent them from accidentally hiding the telemetry or starving the table.
+- Footer-style strips (status bar, version line) must use `exact_height(...)` and stay non-resizable, otherwise the user can drag them into nothingness and the surface becomes unrecoverable.
+
+**Fix (convention)**:
+- The torrent table — and any future "hero" surface in this app — lives in `CentralPanel`. Do not put the table inside a `BottomPanel` "because it fits there for now".
+- Every auxiliary `TopBottomPanel::bottom(...)` that hosts non-trivial content (chart, log, config, side panel) MUST set `resizable(true)`, `default_height(...)`, and `height_range(min..=max)`. Pick a `min` that keeps the panel's primary widget readable at its smallest and a `max` that still leaves the table ~50% of the window.
+- Fixed-height strips (footer status, decorative dividers) use `exact_height(...)` and stay non-resizable.
+- Panel registration order is Top → Bottom (telemetry) → Bottom (footer) → Central. If you add a new auxiliary panel, slot it before `CentralPanel`, never after.
+
+**Anti-patterns**:
+- `egui::CentralPanel::default().show(ctx, |ui| { ui.vertical(|ui| { /* status, table, chart, log */ }) })` — collapses the layout back to a single scroll surface and loses the resize affordance the PRD demands.
+- A `BottomPanel` with `default_height(400.0)` and no `height_range` cap — lets the auxiliary panels swallow the table.
+- A `resizable(true)` footer status strip — the user can drag it to zero height and lose the engine indicator.

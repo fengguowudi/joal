@@ -31,6 +31,7 @@ pub struct Tr {
     pub announce_all_now: &'static str,
 
     // Status bar
+    #[allow(dead_code)]
     pub client: &'static str,
     pub torrents: &'static str,
     pub attention: &'static str,
@@ -42,6 +43,7 @@ pub struct Tr {
     // Speed chart
     pub waiting_for_speed_data: &'static str,
     pub upload_kbs: &'static str,
+    #[allow(dead_code)]
     pub time_s: &'static str,
 
     // Torrent table

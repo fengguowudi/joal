@@ -66,46 +66,46 @@ impl TableState {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-pub fn show(
+/// Standalone table toolbar (search + attention filter + visible count). Lives
+/// in the top panel so the central panel is occupied entirely by table rows.
+pub(super) fn toolbar(
     ui: &mut egui::Ui,
-    snapshot: &mut EngineSnapshot,
-    pending_delete: &mut Option<DeleteConfirmation>,
-    cmd_tx: &mpsc::Sender<EngineCommand>,
+    snapshot: &EngineSnapshot,
     table_state: &mut TableState,
     t: &Tr,
 ) {
-    theme::panel_frame().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let search_response = ui
-                .push_id("torrent_table_search", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut table_state.search_query)
-                            .id_salt("torrent_table_search")
-                            .hint_text(t.search_torrents)
-                            .desired_width(240.0),
-                    )
-                })
-                .inner;
-            if search_response.changed() {
-                search_response.request_focus();
-            }
+    ui.horizontal_wrapped(|ui| {
+        let search_response = ui
+            .push_id("torrent_table_search", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut table_state.search_query)
+                        .id_salt("torrent_table_search")
+                        .hint_text(t.search_torrents)
+                        .desired_width(240.0),
+                )
+            })
+            .inner;
+        if search_response.changed() {
+            search_response.request_focus();
+        }
 
-            let attention_toggle = table_filter_button(
-                t.attention_only,
-                theme::Tone::Warning,
-                table_state.attention_only,
-            );
-            let attention_response = ui
-                .push_id("torrent_table_attention_toggle", |ui| {
-                    ui.add(attention_toggle.min_size(egui::vec2(136.0, 30.0)))
-                })
-                .inner
-                .on_hover_text(t.attention_hint);
-            if attention_response.clicked() {
-                table_state.attention_only = !table_state.attention_only;
-            }
+        let attention_clicked = theme::tone_button(
+            ui,
+            "torrent_table_attention_toggle",
+            t.attention_only,
+            theme::Tone::Warning,
+            egui::vec2(140.0, 30.0),
+            table_state.attention_only,
+        )
+        .on_hover_text(t.attention_hint)
+        .clicked();
+        if attention_clicked {
+            table_state.attention_only = !table_state.attention_only;
+        }
 
+        // Push the visible-count badge to the far right so the toolbar reads
+        // "controls left, counter right" instead of a left-bunched cluster.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             theme::metric(
                 ui,
                 "visible_row_count",
@@ -119,8 +119,17 @@ pub fn show(
             );
         });
     });
-    ui.add_space(8.0);
+}
 
+#[allow(clippy::too_many_lines)]
+pub fn show(
+    ui: &mut egui::Ui,
+    snapshot: &mut EngineSnapshot,
+    pending_delete: &mut Option<DeleteConfirmation>,
+    cmd_tx: &mpsc::Sender<EngineCommand>,
+    table_state: &mut TableState,
+    t: &Tr,
+) {
     if snapshot.torrents.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(egui::RichText::new(t.no_torrents).color(theme::text_secondary()));
@@ -140,15 +149,26 @@ pub fn show(
         .resolve(ui.style())
         .size
         .max(ui.spacing().interact_size.y);
-    let row_height = (text_height * 2.1).max(34.0);
+    let row_height = (text_height * 2.1).max(36.0);
     let available_height = ui.available_height();
+
+    // Visually quiet the table: kill the inter-column vertical separators by
+    // setting `item_spacing.x` to 0 inside cells (the `TableBuilder` itself
+    // already does not draw vertical grid lines), and replace the default
+    // separator/horizontal-line stroke with a near-invisible divider.
+    let style = ui.style_mut();
+    style.visuals.widgets.noninteractive.bg_stroke =
+        egui::Stroke::new(1.0, theme::divider_color());
+    // Make selection and active state colors a touch softer to remove the
+    // chunky outlined look the old palette had.
 
     egui_extras::TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
+        .vscroll(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .min_scrolled_height(available_height)
-        .max_scroll_height(available_height)
+        .min_scrolled_height(available_height.max(120.0))
+        .max_scroll_height(available_height.max(120.0))
         .column(egui_extras::Column::remainder().at_least(220.0)) // Name
         .column(egui_extras::Column::initial(124.0).at_least(120.0)) // Progress
         .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Upload speed
@@ -160,7 +180,7 @@ pub fn show(
         .column(egui_extras::Column::initial(128.0).at_least(118.0)) // Last announce
         .column(egui_extras::Column::initial(200.0).at_least(180.0)) // Health
         .column(egui_extras::Column::initial(184.0).at_least(168.0)) // Actions
-        .header(text_height + 8.0, |mut header| {
+        .header(text_height + 12.0, |mut header| {
             sortable_header(&mut header, table_state, SortColumn::Name, t.col_name);
             sortable_header(
                 &mut header,
@@ -207,7 +227,15 @@ pub fn show(
             );
             sortable_header(&mut header, table_state, SortColumn::Health, t.col_health);
             header.col(|ui| {
-                ui.strong(t.col_actions);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(t.col_actions)
+                            .small()
+                            .color(theme::text_secondary())
+                            .strong(),
+                    )
+                    .truncate(),
+                );
             });
         })
         .body(|body| {
@@ -232,7 +260,7 @@ pub fn show(
                                     egui::RichText::new(short_hash(torrent))
                                         .monospace()
                                         .small()
-                                        .color(theme::text_secondary()),
+                                        .color(theme::text_tertiary()),
                                 )
                                 .truncate(),
                             )
@@ -248,54 +276,87 @@ pub fn show(
                         } else {
                             theme::Tone::Accent
                         };
+                        // Use the tone's strong foreground color for the
+                        // progress fill so it stands out, with a soft track
+                        // (panel_fill) so the bar reads as a pill, not a
+                        // square.
                         ui.add(
                             egui::ProgressBar::new(progress as f32)
                                 .desired_width(ui.available_width())
-                                .fill(theme::tone_colors(tone).stroke)
-                                .corner_radius(egui::CornerRadius::same(5))
-                                .text(progress_text(torrent)),
+                                .fill(theme::tone_colors(tone).fg)
+                                .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
+                                .text(
+                                    egui::RichText::new(progress_text(torrent))
+                                        .small()
+                                        .strong()
+                                        .color(theme::text_primary()),
+                                ),
                         );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "upload_speed", |ui| {
-                        ui.label(format_speed(torrent.current_speed_bps));
+                        ui.label(
+                            egui::RichText::new(format_speed(torrent.current_speed_bps))
+                                .color(theme::text_primary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "uploaded", |ui| {
-                        ui.label(format_bytes(torrent.uploaded_bytes));
+                        ui.label(
+                            egui::RichText::new(format_bytes(torrent.uploaded_bytes))
+                                .color(theme::text_primary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "download_speed", |ui| {
-                        ui.label(format_speed(torrent.current_download_speed_bps));
+                        ui.label(
+                            egui::RichText::new(format_speed(torrent.current_download_speed_bps))
+                                .color(theme::text_secondary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "downloaded", |ui| {
-                        ui.label(format_bytes(torrent.downloaded_bytes));
+                        ui.label(
+                            egui::RichText::new(format_bytes(torrent.downloaded_bytes))
+                                .color(theme::text_secondary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "seeders", |ui| {
-                        ui.label(opt_u32(torrent.last_known_seeders));
+                        ui.label(
+                            egui::RichText::new(opt_u32(torrent.last_known_seeders))
+                                .color(theme::text_primary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "leechers", |ui| {
-                        ui.label(opt_u32(torrent.last_known_leechers));
+                        ui.label(
+                            egui::RichText::new(opt_u32(torrent.last_known_leechers))
+                                .color(theme::text_primary()),
+                        );
                     });
                 });
                 row.col(|ui| {
                     cell_scope(ui, row_index, "announce_meta", |ui| {
                         ui.vertical(|ui| {
-                            ui.add(egui::Label::new(last_announce_text(torrent, t)).truncate());
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(last_announce_text(torrent, t))
+                                        .color(theme::text_primary()),
+                                )
+                                .truncate(),
+                            );
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(interval_text(torrent, t))
                                         .small()
-                                        .color(theme::text_secondary()),
+                                        .color(theme::text_tertiary()),
                                 )
                                 .truncate(),
                             );
@@ -316,19 +377,15 @@ pub fn show(
                             } else {
                                 t.action_mark_complete
                             };
-                            let response = ui
-                                .push_id("mark_completed", |ui| {
-                                    ui.add(
-                                        row_action_button(
-                                            mark_label,
-                                            theme::Tone::Success,
-                                            torrent.initial_completed,
-                                        )
-                                        .min_size(egui::vec2(88.0, 24.0)),
-                                    )
-                                })
-                                .inner
-                                .on_hover_text(t.mark_completed_tooltip);
+                            let response = theme::tone_button(
+                                ui,
+                                "mark_completed",
+                                mark_label,
+                                theme::Tone::Success,
+                                egui::vec2(88.0, 24.0),
+                                torrent.initial_completed,
+                            )
+                            .on_hover_text(t.mark_completed_tooltip);
                             if response.clicked() {
                                 torrent.initial_completed = !torrent.initial_completed;
                                 let _ =
@@ -338,19 +395,15 @@ pub fn show(
                                     });
                             }
 
-                            if ui
-                                .push_id("archive_torrent", |ui| {
-                                    ui.add(
-                                        row_action_button(
-                                            t.action_archive,
-                                            theme::Tone::Danger,
-                                            true,
-                                        )
-                                        .min_size(egui::vec2(68.0, 24.0)),
-                                    )
-                                })
-                                .inner
-                                .clicked()
+                            if theme::tone_button(
+                                ui,
+                                "archive_torrent",
+                                t.action_archive,
+                                theme::Tone::Danger,
+                                egui::vec2(68.0, 24.0),
+                                false,
+                            )
+                            .clicked()
                             {
                                 *pending_delete = Some(DeleteConfirmation {
                                     info_hash: torrent.info_hash.clone(),
@@ -476,55 +529,39 @@ fn sortable_header(
 ) {
     header.col(|ui| {
         let active = table_state.sort_column == column;
-        let button_label = if table_state.sort_column == column {
-            format!(
-                "{} {}",
-                label,
-                match table_state.sort_direction {
-                    SortDirection::Ascending => "↑",
-                    SortDirection::Descending => "↓",
-                }
-            )
+        let arrow = if active {
+            match table_state.sort_direction {
+                SortDirection::Ascending => " ↑",
+                SortDirection::Descending => " ↓",
+            }
         } else {
-            label.to_owned()
+            ""
         };
-        // The header sits inside a column whose width is decided by TableBuilder.
-        // Use a min_size button so it grows with the column without depending on
-        // `ui.available_width()`, which can shift between passes when neighbouring
-        // columns reflow and triggers `Widget rect changed id between passes` warnings.
+        let button_label = format!("{label}{arrow}");
+        // Headers are intentionally chrome-free — just colored text. They are
+        // still clickable to toggle sort. Use a borderless, fill-less button so
+        // the table feels less like a spreadsheet.
         let min_width = (ui.available_width() - 4.0).max(64.0);
         let clicked = ui
             .push_id(("torrent_table_sort", column), |ui| {
+                let fg = if active {
+                    theme::primary_color()
+                } else {
+                    theme::text_secondary()
+                };
                 ui.add(
-                    egui::Button::new(egui::RichText::new(button_label).strong().color(
-                        if active {
-                            theme::tone_colors(theme::Tone::Accent).fg
-                        } else {
-                            theme::text_secondary()
-                        },
-                    ))
-                    .truncate()
-                    .fill(
-                        theme::tone_colors(if active {
-                            theme::Tone::Accent
-                        } else {
-                            theme::Tone::Neutral
-                        })
-                        .bg,
+                    egui::Button::new(
+                        egui::RichText::new(button_label)
+                            .small()
+                            .strong()
+                            .color(fg),
                     )
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        theme::tone_colors(if active {
-                            theme::Tone::Accent
-                        } else {
-                            theme::Tone::Neutral
-                        })
-                        .stroke,
-                    ))
-                    .corner_radius(egui::CornerRadius::same(5))
-                    .selected(active)
-                    .frame_when_inactive(true)
-                    .min_size(egui::vec2(min_width, 24.0)),
+                    .truncate()
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
+                    .frame_when_inactive(false)
+                    .min_size(egui::vec2(min_width, 22.0)),
                 )
                 .clicked()
             })
@@ -554,7 +591,7 @@ fn health_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus, t: 
             egui::Label::new(
                 egui::RichText::new(health_detail(torrent, t))
                     .small()
-                    .color(theme::text_secondary()),
+                    .color(theme::text_tertiary()),
             )
             .truncate(),
         )
@@ -647,40 +684,6 @@ fn cell_scope<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     ui.push_id((row_index, key), add_contents).inner
-}
-
-fn table_filter_button(label: &str, tone: theme::Tone, selected: bool) -> egui::Button<'_> {
-    let palette = theme::tone_colors(if selected { tone } else { theme::Tone::Neutral });
-    egui::Button::new(egui::RichText::new(label).strong().color(if selected {
-        palette.fg
-    } else {
-        theme::text_primary()
-    }))
-    .truncate()
-    .fill(palette.bg)
-    .stroke(egui::Stroke::new(1.0, palette.stroke))
-    .corner_radius(egui::CornerRadius::same(5))
-    .selected(selected)
-    .frame_when_inactive(true)
-}
-
-fn row_action_button(label: &str, tone: theme::Tone, highlighted: bool) -> egui::Button<'_> {
-    let palette = theme::tone_colors(if highlighted {
-        tone
-    } else {
-        theme::Tone::Neutral
-    });
-    egui::Button::new(egui::RichText::new(label).strong().color(if highlighted {
-        palette.fg
-    } else {
-        theme::text_primary()
-    }))
-    .truncate()
-    .fill(palette.bg)
-    .stroke(egui::Stroke::new(1.0, palette.stroke))
-    .corner_radius(egui::CornerRadius::same(5))
-    .selected(highlighted)
-    .frame_when_inactive(true)
 }
 
 #[cfg(test)]
