@@ -582,8 +582,14 @@ impl eframe::App for JoalApp {
         //   1) status badges/metrics on the left, action buttons pushed to the
         //      right edge with a right-to-left layout
         //   2) the table toolbar (search + filter + visible count)
+        //
+        // Uses `theme::strip_frame(...)` (square corners, edge-to-edge fill)
+        // because this is a horizontal divider strip, not a card. Rounded
+        // corners on a panel that spans the full window width would render as
+        // chiclets pinned to the top edge — interactive controls (buttons,
+        // the config window) keep their own rounding via their helpers.
         egui::Panel::top("top_panel")
-            .frame(theme::panel_frame())
+            .frame(theme::strip_frame(theme::surface()))
             .show_inside(ui, |ui| {
                 self.draw_top_status_row(ui, t);
                 ui.add_space(8.0);
@@ -599,12 +605,9 @@ impl eframe::App for JoalApp {
 
         // === BOTTOM FOOTER: thin uptime + telemetry strip (~28 px) ===
         // Sits below the telemetry panel so it always hugs the window edge.
+        // Also square-cornered for the same reason as the top strip.
         egui::Panel::bottom("footer_status")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::surface())
-                    .inner_margin(egui::Margin::symmetric(16, 6)),
-            )
+            .frame(theme::strip_frame(theme::surface()))
             .show_inside(ui, |ui| {
                 status_bar::bottom_bar(
                     ui,
@@ -646,59 +649,73 @@ impl eframe::App for JoalApp {
                 });
             });
 
-        // === CONFIG SIDE PANEL (right) ===
-        if self.show_config_panel {
-            egui::Panel::right("config_panel")
-                .default_size(340.0)
-                .min_size(280.0)
-                .max_size(460.0)
+        // === CONFIG WINDOW (floating, draggable) ===
+        // The config editor lives in a floating egui Window so opening or
+        // closing it does NOT reflow the central torrent table area. Prior
+        // versions used an inline right-side panel, which forced the central
+        // layout to recompute between passes and perturbed the auto-generated
+        // ids of the per-row action cluster (badges + mark/archive buttons).
+        // That manifested as
+        //   `WARN egui::context: ... changed id between passes`
+        // every time the user toggled the panel. With a floating Window the
+        // central pane keeps the same rect tree across both pass-1 and pass-2,
+        // which combined with `torrent_table.rs`'s positional `row.index()`
+        // anchoring (see the egui id-stability rule in
+        // `.trellis/spec/backend/quality-guidelines.md`) is what keeps the row
+        // widget ids stable.
+        let mut show_config_window = self.show_config_panel;
+        if show_config_window {
+            let window_response = egui::Window::new(t.configuration)
+                .id(egui::Id::new("config_window"))
+                .open(&mut show_config_window)
+                .collapsible(false)
                 .resizable(true)
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::app_background())
-                        .inner_margin(egui::Margin::symmetric(12, 12)),
-                )
-                .show_inside(ui, |ui| {
-                    let action = theme::panel_frame()
-                        .show(ui, |ui| {
-                            config_panel::show(
-                                ui,
-                                &mut self.config_edit,
-                                config_panel::ConfigPanelView {
-                                    validation_errors: &self.config_validation_errors,
-                                    operation_error: self.config_operation_error.as_deref(),
-                                    notice: self.config_notice,
-                                    apply_in_progress: self.config_apply_in_progress,
-                                    available_clients: &self.available_clients,
-                                    t,
-                                },
-                            )
-                        })
-                        .inner;
-                    if action.edited {
-                        self.config_validation_errors.clear();
-                        self.config_operation_error = None;
-                        self.config_notice = None;
-                    }
-                    if action.apply_requested {
-                        match self.config_edit.validated_config(&self.available_clients) {
-                            Ok(config) => {
-                                self.config_validation_errors.clear();
-                                self.config_operation_error = None;
-                                self.config_notice = None;
-                                self.config_apply_in_progress = true;
-                                self.send_command(EngineCommand::ApplyConfig(config));
-                            }
-                            Err(errors) => {
-                                self.config_validation_errors = errors;
-                                self.config_operation_error = None;
-                                self.config_notice = None;
-                                self.config_apply_in_progress = false;
-                            }
+                .default_size(egui::vec2(420.0, 560.0))
+                .min_width(360.0)
+                .anchor(egui::Align2::RIGHT_TOP, [-16.0, 64.0])
+                .show(ui.ctx(), |ui| {
+                    config_panel::show(
+                        ui,
+                        &mut self.config_edit,
+                        config_panel::ConfigPanelView {
+                            validation_errors: &self.config_validation_errors,
+                            operation_error: self.config_operation_error.as_deref(),
+                            notice: self.config_notice,
+                            apply_in_progress: self.config_apply_in_progress,
+                            available_clients: &self.available_clients,
+                            t,
+                        },
+                    )
+                });
+            if let Some(inner) = window_response.and_then(|r| r.inner) {
+                if inner.edited {
+                    self.config_validation_errors.clear();
+                    self.config_operation_error = None;
+                    self.config_notice = None;
+                }
+                if inner.apply_requested {
+                    match self.config_edit.validated_config(&self.available_clients) {
+                        Ok(config) => {
+                            self.config_validation_errors.clear();
+                            self.config_operation_error = None;
+                            self.config_notice = None;
+                            self.config_apply_in_progress = true;
+                            self.send_command(EngineCommand::ApplyConfig(config));
+                        }
+                        Err(errors) => {
+                            self.config_validation_errors = errors;
+                            self.config_operation_error = None;
+                            self.config_notice = None;
+                            self.config_apply_in_progress = false;
                         }
                     }
-                });
+                }
+            }
         }
+        // Reflect the window's own close affordance (the X in its title bar
+        // or Esc) back into our toggle state so the gear button stays in
+        // sync.
+        self.show_config_panel = show_config_window;
 
         // === DELETE CONFIRMATION DIALOG ===
         let mut close_dialog = false;

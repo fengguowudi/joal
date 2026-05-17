@@ -162,6 +162,54 @@ pub fn show(
     // Make selection and active state colors a touch softer to remove the
     // chunky outlined look the old palette had.
 
+    // Sum of the columns' `at_least` widths plus the Name column's own
+    // 220px floor. Once the viewport is narrower than this, the table needs
+    // horizontal scrolling so the right-edge action cluster does not get
+    // clipped behind the viewport edge. Vertical scrolling is still handled
+    // by `TableBuilder::vscroll(true)` below — the outer `ScrollArea` here
+    // is horizontal-only so we do not double-wrap the same axis.
+    let min_table_width = 220.0
+        + 120.0 // Progress
+        + 72.0 + 84.0 // Upload speed + Uploaded
+        + 72.0 + 84.0 // Download speed + Downloaded
+        + 64.0 + 64.0 // Seeders + Leechers
+        + 118.0 // Last announce
+        + 180.0 // Health
+        + 168.0 // Actions
+        + 8.0; // small slack so the last column does not touch the scrollbar
+    egui::ScrollArea::horizontal()
+        .id_salt("torrent_table_hscroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_min_width(min_table_width);
+            build_torrent_table(
+                ui,
+                snapshot,
+                pending_delete,
+                cmd_tx,
+                table_state,
+                t,
+                &visible_indices,
+                text_height,
+                row_height,
+                available_height,
+            );
+        });
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn build_torrent_table(
+    ui: &mut egui::Ui,
+    snapshot: &mut EngineSnapshot,
+    pending_delete: &mut Option<DeleteConfirmation>,
+    cmd_tx: &mpsc::Sender<EngineCommand>,
+    table_state: &mut TableState,
+    t: &Tr,
+    visible_indices: &[usize],
+    text_height: f32,
+    row_height: f32,
+    available_height: f32,
+) {
     egui_extras::TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
@@ -243,6 +291,17 @@ pub fn show(
                 let row_index = row.index();
                 let index = visible_indices[row_index];
                 let torrent = &mut snapshot.torrents[index];
+                // Row id anchor is `row_index` (positional / slot key), NOT
+                // `info_hash`. This follows the documented egui id-stability
+                // convention in `.trellis/spec/backend/quality-guidelines.md`:
+                // for row/slot-based layouts whose visual identity is the
+                // screen position (TableBuilder rows + cells), keys must be
+                // scoped by the stable slot — `row.index()` here — not by
+                // domain data (info_hash) that can move to a different rect
+                // inside the same frame. The latter would re-introduce
+                // `WARN egui::context: ... changed id between passes` whenever
+                // a sorting/filtering shuffle puts a different torrent into a
+                // previously-occupied rect.
                 row.col(|ui| {
                     cell_scope(ui, row_index, "name", |ui| {
                         ui.vertical(|ui| {
@@ -586,6 +645,8 @@ fn health_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus, t: 
     };
 
     ui.vertical(|ui| {
+        // Badge id is anchored to the row's positional slot key, matching the
+        // documented egui id-stability convention for table-row widgets.
         theme::badge(ui, (row_index, "health_badge"), label, tone);
         ui.add(
             egui::Label::new(
@@ -683,6 +744,13 @@ fn cell_scope<R>(
     key: &'static str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    // Each cell's id is anchored on the row's positional `row_index` plus a
+    // static per-column key. Using `row_index` (the visual slot, not the
+    // torrent identity) keeps widget ids stable across multi-pass layout — the
+    // same screen rect always carries the same id chain regardless of how a
+    // sibling panel/scrollbar reshapes the central area between passes. This
+    // mirrors `.trellis/spec/backend/quality-guidelines.md`'s rule for row /
+    // slot-based layouts.
     ui.push_id((row_index, key), add_contents).inner
 }
 

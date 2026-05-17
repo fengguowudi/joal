@@ -141,6 +141,19 @@ pub(super) fn panel_frame() -> Frame {
         .inner_margin(Margin::symmetric(16, 16))
 }
 
+/// Edge-to-edge strip frame: square corners, configurable fill. Used for the
+/// top status strip and bottom footer that act as visual dividers between
+/// content regions. Rounded corners here would make the strips look like
+/// chiclets rather than dividers — interactive controls (buttons, the config
+/// window) keep their rounding via their own helpers.
+pub(super) fn strip_frame(fill: Color32) -> Frame {
+    Frame::new()
+        .fill(fill)
+        .stroke(Stroke::NONE)
+        .corner_radius(CornerRadius::ZERO)
+        .inner_margin(Margin::symmetric(16, 10))
+}
+
 pub(super) fn inset_frame() -> Frame {
     Frame::new()
         .fill(panel_fill())
@@ -172,6 +185,45 @@ pub(super) fn badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
                         Label::new(RichText::new(text).color(colors.fg).strong().small())
                             .truncate(),
                     );
+                });
+            });
+    });
+}
+
+/// Larger, status-strip-grade badge: leads with a colored dot indicator and a
+/// non-`small()` label so the engine status reads at the same weight as the
+/// "uptime" / runtime metric sitting next to it. Used by `top_bar_status` and
+/// `bottom_bar` for the engine `running` / `stopped` indicator. Standard
+/// `badge` stays compact for inline use elsewhere.
+pub(super) fn engine_badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
+    let colors = tone_colors(tone);
+    ui.push_id(id, |ui| {
+        Frame::new()
+            .fill(colors.bg)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::same(CR_INSET))
+            .inner_margin(Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    // Inline status dot — `\u{25CF}` (BLACK CIRCLE) glyph sized
+                    // up so it visually weighs the same as the label and the
+                    // adjacent uptime text. Wrapped in its own push_id so the
+                    // dot's auto-generated rect cannot drift between passes if
+                    // the label width changes.
+                    ui.push_id("engine_badge_dot", |ui| {
+                        ui.add(Label::new(
+                            RichText::new("\u{25CF}")
+                                .size(14.0)
+                                .color(colors.fg),
+                        ));
+                    });
+                    ui.push_id("engine_badge_label", |ui| {
+                        ui.add(
+                            Label::new(RichText::new(text).color(colors.fg).strong())
+                                .truncate(),
+                        );
+                    });
                 });
             });
     });

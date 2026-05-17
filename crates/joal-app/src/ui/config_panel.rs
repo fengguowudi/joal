@@ -52,15 +52,20 @@ pub fn show(
     ui.add_space(8.0);
     show_feedback(ui, &view);
 
-    let apply_width = ui.available_width().max(180.0);
-    let apply_requested = theme::primary_button_enabled(
-        ui,
-        "config_apply_button",
-        t.save_and_restart,
-        egui::vec2(apply_width, 34.0),
-        !view.apply_in_progress,
-    )
-    .clicked();
+    // The "save & restart" button gets a centered, deliberately larger touch
+    // target so it reads as the single primary action of this surface.
+    let apply_requested = ui
+        .vertical_centered(|ui| {
+            theme::primary_button_enabled(
+                ui,
+                "config_apply_button",
+                t.save_and_restart,
+                egui::vec2(240.0, 36.0),
+                !view.apply_in_progress,
+            )
+            .clicked()
+        })
+        .inner;
 
     ConfigPanelAction {
         apply_requested,
@@ -75,9 +80,14 @@ fn show_config_grid(
     t: &Tr,
 ) -> bool {
     let mut edited = false;
+    // Both `config_grid` and `proxy_grid` share the same `min_col_width` /
+    // `spacing` settings so their left label columns line up vertically across
+    // the two inset frames — otherwise each grid would auto-size its label
+    // column independently and the forms would drift.
     egui::Grid::new("config_grid")
         .num_columns(2)
-        .spacing([12.0, 8.0])
+        .min_col_width(120.0)
+        .spacing([24.0, 12.0])
         .show(ui, |ui| {
             field_label(ui, t.min_upload_rate);
             edited |= config_text_field(ui, "config_min_upload_rate", &mut state.min_upload_rate)
@@ -117,8 +127,10 @@ fn show_config_grid(
             ui.end_row();
 
             field_label(ui, t.client_label);
+            // Match the text-field width (148px) so the client combo lines up
+            // with the inputs above instead of standing out wider.
             egui::ComboBox::from_id_salt("client_combo")
-                .width(178.0)
+                .width(148.0)
                 .truncate()
                 .selected_text(&state.selected_client)
                 .show_ui(ui, |ui| {
@@ -130,10 +142,16 @@ fn show_config_grid(
                 });
             ui.end_row();
 
-            field_label(ui, t.keep_zero_leecher);
+            // Empty left cell — the checkbox row reuses the label slot for the
+            // checkbox itself so clicking the i18n text toggles the value
+            // (previously the label sat in column 1 and was not clickable).
+            ui.label("");
             edited |= ui
                 .push_id("config_keep_zero_leecher", |ui| {
-                    ui.checkbox(&mut state.keep_torrent_with_zero_leechers, "")
+                    ui.checkbox(
+                        &mut state.keep_torrent_with_zero_leechers,
+                        t.keep_zero_leecher,
+                    )
                 })
                 .inner
                 .changed();
@@ -146,7 +164,8 @@ fn show_proxy_grid(ui: &mut egui::Ui, state: &mut ConfigEditState, t: &Tr) -> bo
     let mut edited = false;
     egui::Grid::new("proxy_grid")
         .num_columns(2)
-        .spacing([12.0, 8.0])
+        .min_col_width(120.0)
+        .spacing([24.0, 12.0])
         .show(ui, |ui| {
             field_label(ui, t.proxy_host);
             edited |= config_text_field(ui, "config_proxy_host", &mut state.proxy_host).changed();

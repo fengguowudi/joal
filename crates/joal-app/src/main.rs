@@ -144,8 +144,12 @@ fn main() -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JOAL Desktop")
-            .with_inner_size([800.0, 600.0])
-            .with_min_inner_size([640.0, 480.0]),
+            // 1280x800 gives the torrent table room for all 11 columns without
+            // horizontal scrolling on a fresh install, while the 960x600 floor
+            // keeps the window usable on 13" laptops without letting users
+            // squish it below the point where the action cluster wraps.
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };
 

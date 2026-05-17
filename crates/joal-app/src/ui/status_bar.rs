@@ -27,7 +27,10 @@ pub fn top_bar_status(
         .filter(|torrent| torrent.last_known_leechers == Some(0))
         .count();
 
-    theme::badge(
+    // Engine status uses the larger `engine_badge` (colored status dot + label
+    // at body-text size) so it visually anchors next to the upload/download
+    // metrics rather than reading as a tiny pill.
+    theme::engine_badge(
         ui,
         "engine_state",
         if engine_running { t.running } else { t.stopped },
@@ -111,7 +114,7 @@ pub fn bottom_bar(
         let m = (elapsed % 3600) / 60;
         let s = elapsed % 60;
 
-        theme::badge(
+        theme::engine_badge(
             ui,
             "engine_status_footer",
             if engine_running { t.running } else { t.stopped },
