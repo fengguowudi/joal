@@ -110,7 +110,7 @@ pub(super) fn toolbar(
                 ui,
                 "visible_row_count",
                 "",
-                format!(
+                &format!(
                     "{}/{}",
                     visible_count(snapshot, table_state),
                     snapshot.torrents.len()
@@ -157,8 +157,7 @@ pub fn show(
     // already does not draw vertical grid lines), and replace the default
     // separator/horizontal-line stroke with a near-invisible divider.
     let style = ui.style_mut();
-    style.visuals.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, theme::divider_color());
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::divider_color());
     // Make selection and active state colors a touch softer to remove the
     // chunky outlined look the old palette had.
 
@@ -616,18 +615,13 @@ fn sortable_header(
                     theme::text_secondary()
                 };
                 ui.add(
-                    egui::Button::new(
-                        egui::RichText::new(button_label)
-                            .small()
-                            .strong()
-                            .color(fg),
-                    )
-                    .truncate()
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
-                    .frame_when_inactive(false)
-                    .min_size(egui::vec2(min_width, 22.0)),
+                    egui::Button::new(egui::RichText::new(button_label).small().strong().color(fg))
+                        .truncate()
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(min_width, 22.0)),
                 )
                 .clicked()
             })

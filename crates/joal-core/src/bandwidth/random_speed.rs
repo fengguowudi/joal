@@ -140,7 +140,11 @@ impl RandomSpeedProvider {
             return;
         }
         let span = max - min;
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let max_step = (((span as f64) * MAX_STEP_PER_TICK_RATIO) as u64).max(1);
         let delta = self.source.sample_delta(max_step);
         let next = i128::from(self.current_speed_bytes_per_sec) + i128::from(delta);
@@ -223,7 +227,11 @@ impl DownloadSpeedProvider {
             return;
         }
         let span = max - min;
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let max_step = (((span as f64) * MAX_STEP_PER_TICK_RATIO) as u64).max(1);
         let delta = self.source.sample_delta(max_step);
         let next = i128::from(self.current_speed_bytes_per_sec) + i128::from(delta);
@@ -431,7 +439,10 @@ mod tests {
 
     #[test]
     fn step_is_noop_when_min_equals_max() {
-        let source = Box::new(FixedSource::with_deltas(vec![50_000], vec![999_999, -999_999]));
+        let source = Box::new(FixedSource::with_deltas(
+            vec![50_000],
+            vec![999_999, -999_999],
+        ));
         let mut provider = RandomSpeedProvider::with_source(&config(50, 50), source);
         provider.step();
         provider.step();

@@ -595,12 +595,7 @@ impl eframe::App for JoalApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
-                torrent_table::toolbar(
-                    ui,
-                    &self.current_snapshot,
-                    &mut self.table_state,
-                    t,
-                );
+                torrent_table::toolbar(ui, &self.current_snapshot, &mut self.table_state, t);
             });
 
         // === BOTTOM FOOTER: thin uptime + telemetry strip (~28 px) ===

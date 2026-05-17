@@ -28,7 +28,7 @@ pub fn show(
                 ui,
                 "log_entry_count",
                 "",
-                format!("{} {}", log_buffer.len(), t.entries),
+                &format!("{} {}", log_buffer.len(), t.entries),
                 theme::Tone::Neutral,
             );
         });

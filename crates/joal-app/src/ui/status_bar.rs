@@ -10,12 +10,7 @@ use super::{i18n::Tr, theme};
 /// height-efficient line. The function does NOT call `ui.horizontal()` —
 /// callers wrap it in whatever layout they need (the main app embeds it in a
 /// horizontal layout shared with action buttons).
-pub fn top_bar_status(
-    ui: &mut egui::Ui,
-    snapshot: &EngineSnapshot,
-    engine_running: bool,
-    t: &Tr,
-) {
+pub fn top_bar_status(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
     let attention_count = snapshot
         .torrents
         .iter()
@@ -44,28 +39,28 @@ pub fn top_bar_status(
         ui,
         "global_upload_speed",
         "▲",
-        format_speed(snapshot.global_upload_speed_bps),
+        &format_speed(snapshot.global_upload_speed_bps),
         theme::Tone::Accent,
     );
     theme::metric(
         ui,
         "global_download_speed",
         "▼",
-        format_speed(snapshot.global_download_speed_bps),
+        &format_speed(snapshot.global_download_speed_bps),
         theme::Tone::Info,
     );
     theme::metric(
         ui,
         "torrent_count",
         t.torrents,
-        snapshot.torrents.len(),
+        &snapshot.torrents.len(),
         theme::Tone::Neutral,
     );
     theme::metric(
         ui,
         "attention_count",
         t.attention,
-        attention_count,
+        &attention_count,
         if attention_count > 0 {
             theme::Tone::Warning
         } else {
@@ -76,7 +71,7 @@ pub fn top_bar_status(
         ui,
         "zero_leechers_count",
         t.zero_leechers,
-        zero_leecher_count,
+        &zero_leecher_count,
         if zero_leecher_count > 0 {
             theme::Tone::Warning
         } else {
@@ -90,12 +85,7 @@ pub fn top_bar_status(
 /// else. Production UI calls `top_bar_status` directly inside its own
 /// horizontal row so it can pack action buttons alongside.
 #[cfg(test)]
-pub fn top_bar(
-    ui: &mut egui::Ui,
-    snapshot: &EngineSnapshot,
-    engine_running: bool,
-    t: &Tr,
-) {
+pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
     ui.horizontal(|ui| {
         top_bar_status(ui, snapshot, engine_running, t);
     });
@@ -128,7 +118,7 @@ pub fn bottom_bar(
             ui,
             "uptime_footer",
             t.uptime,
-            format!("{h:02}:{m:02}:{s:02}"),
+            &format!("{h:02}:{m:02}:{s:02}"),
             theme::Tone::Neutral,
         );
 
@@ -154,14 +144,14 @@ pub fn bottom_bar(
                 ui,
                 "torrent_count_footer",
                 t.torrents,
-                snapshot.torrents.len(),
+                &snapshot.torrents.len(),
                 theme::Tone::Neutral,
             );
             theme::metric(
                 ui,
                 "global_upload_speed_footer",
                 "▲",
-                format_speed(snapshot.global_upload_speed_bps),
+                &format_speed(snapshot.global_upload_speed_bps),
                 theme::Tone::Accent,
             );
         });

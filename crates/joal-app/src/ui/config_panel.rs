@@ -253,11 +253,7 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).color(theme::text_primary()));
 }
 
-fn config_text_field<'a>(
-    ui: &mut egui::Ui,
-    id: &'static str,
-    value: &'a mut String,
-) -> egui::Response {
+fn config_text_field(ui: &mut egui::Ui, id: &'static str, value: &mut String) -> egui::Response {
     ui.add(
         egui::TextEdit::singleline(value)
             .id_salt(id)

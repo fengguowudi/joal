@@ -253,15 +253,12 @@ pub(super) fn engine_badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
                     // the label width changes.
                     ui.push_id("engine_badge_dot", |ui| {
                         ui.add(Label::new(
-                            RichText::new("\u{25CF}")
-                                .size(14.0)
-                                .color(colors.fg),
+                            RichText::new("\u{25CF}").size(14.0).color(colors.fg),
                         ));
                     });
                     ui.push_id("engine_badge_label", |ui| {
                         ui.add(
-                            Label::new(RichText::new(text).color(colors.fg).strong())
-                                .truncate(),
+                            Label::new(RichText::new(text).color(colors.fg).strong()).truncate(),
                         );
                     });
                 });
@@ -269,7 +266,7 @@ pub(super) fn engine_badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
     });
 }
 
-pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: impl ToString, tone: Tone) {
+pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: &impl ToString, tone: Tone) {
     let colors = tone_colors(tone);
     let value = value.to_string();
     ui.push_id(id, |ui| {

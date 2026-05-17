@@ -19,7 +19,7 @@ pub fn show(ui: &mut egui::Ui, speed_history: &VecDeque<(f64, f64)>, t: &Tr) {
                     ui,
                     "latest_upload_speed",
                     "",
-                    format!("{:.1} KB/s", latest_speed / 1024.0),
+                    &format!("{:.1} KB/s", latest_speed / 1024.0),
                     theme::Tone::Accent,
                 );
             });
