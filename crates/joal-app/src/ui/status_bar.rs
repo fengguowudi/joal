@@ -14,8 +14,12 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
         .filter(|torrent| torrent.last_known_leechers == Some(0))
         .count();
 
+    // Single-row state strip: left segment shows the engine status and the
+    // primary throughput/torrent-count metrics; right segment pushes the
+    // attention counters and the active client filename to the far edge so the
+    // strip is edge-to-edge instead of left-clumped.
     theme::panel_frame().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             theme::badge(
                 ui,
                 "engine_state",
@@ -47,56 +51,76 @@ pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: boo
                 snapshot.torrents.len(),
                 theme::Tone::Neutral,
             );
-            theme::metric(
-                ui,
-                "attention_count",
-                t.attention,
-                attention_count,
-                if attention_count > 0 {
-                    theme::Tone::Warning
-                } else {
-                    theme::Tone::Success
-                },
-            );
-            theme::metric(
-                ui,
-                "zero_leechers_count",
-                t.zero_leechers,
-                zero_leecher_count,
-                if zero_leecher_count > 0 {
-                    theme::Tone::Warning
-                } else {
-                    theme::Tone::Neutral
-                },
-            );
-        });
-        ui.add_space(6.0);
-        ui.push_id("active_client_strip", |ui| {
-            theme::inset_frame().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(t.client)
-                            .small()
-                            .color(theme::text_secondary()),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&snapshot.active_client_filename)
-                                .strong()
-                                .color(theme::text_primary()),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(&snapshot.active_client_filename);
+
+            // Right-anchored segment: lay items out right-to-left so they
+            // attach to the strip's trailing edge. Order in code is the order
+            // visually right-to-left, so the active client filename ends up at
+            // the far right of the strip.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.push_id("active_client_strip", |ui| {
+                    ui.horizontal(|ui| {
+                        // The wrapping `active_client_strip` push_id is not
+                        // enough on its own — the filename text mutates between
+                        // frames (different clients) and even the localized
+                        // "Client" label changes width when the language is
+                        // toggled, so each inner label gets its own static
+                        // push_id key for stable multi-pass id derivation.
+                        ui.push_id("active_client_label", |ui| {
+                            ui.label(
+                                egui::RichText::new(t.client)
+                                    .small()
+                                    .color(theme::text_secondary()),
+                            );
+                        });
+                        ui.push_id("active_client_filename", |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&snapshot.active_client_filename)
+                                        .strong()
+                                        .color(theme::text_primary()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&snapshot.active_client_filename);
+                        });
+                    });
                 });
+                theme::metric(
+                    ui,
+                    "zero_leechers_count",
+                    t.zero_leechers,
+                    zero_leecher_count,
+                    if zero_leecher_count > 0 {
+                        theme::Tone::Warning
+                    } else {
+                        theme::Tone::Neutral
+                    },
+                );
+                theme::metric(
+                    ui,
+                    "attention_count",
+                    t.attention,
+                    attention_count,
+                    if attention_count > 0 {
+                        theme::Tone::Warning
+                    } else {
+                        theme::Tone::Success
+                    },
+                );
             });
         });
     });
 }
 
-pub fn bottom_bar(ui: &mut egui::Ui, started_at: std::time::Instant, engine_running: bool, t: &Tr) {
+pub fn bottom_bar(
+    ui: &mut egui::Ui,
+    snapshot: &EngineSnapshot,
+    started_at: std::time::Instant,
+    engine_running: bool,
+    t: &Tr,
+) {
     theme::panel_frame().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             let elapsed = started_at.elapsed().as_secs();
             let h = elapsed / 3600;
             let m = (elapsed % 3600) / 60;
@@ -119,6 +143,27 @@ pub fn bottom_bar(ui: &mut egui::Ui, started_at: std::time::Instant, engine_runn
                 format!("{h:02}:{m:02}:{s:02}"),
                 theme::Tone::Neutral,
             );
+
+            // Right-anchored footer telemetry: mirrors the top bar's "▲" speed
+            // and torrent-count metrics so the bottom strip is balanced and the
+            // user can read the same headline numbers at a glance from either
+            // edge of the workspace.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::metric(
+                    ui,
+                    "torrent_count_footer",
+                    t.torrents,
+                    snapshot.torrents.len(),
+                    theme::Tone::Neutral,
+                );
+                theme::metric(
+                    ui,
+                    "global_upload_speed_footer",
+                    "▲",
+                    format_speed(snapshot.global_upload_speed_bps),
+                    theme::Tone::Accent,
+                );
+            });
         });
     });
 }

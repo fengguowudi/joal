@@ -233,7 +233,7 @@ fn benchmark_ui_frame(
                 status_bar::top_bar(ui, &snapshot, true, t);
             });
             egui::Panel::bottom("benchmark_bottom").show(ctx, |ui| {
-                status_bar::bottom_bar(ui, started_at, true, t);
+                status_bar::bottom_bar(ui, &snapshot, started_at, true, t);
             });
             egui::Panel::right("benchmark_config")
                 .default_size(320.0)

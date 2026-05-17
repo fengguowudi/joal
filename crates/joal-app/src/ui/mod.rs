@@ -675,7 +675,13 @@ impl eframe::App for JoalApp {
         });
 
         egui::Panel::bottom("bottom_bar").show_inside(ui, |ui| {
-            status_bar::bottom_bar(ui, self.started_at, self.engine_running, t);
+            status_bar::bottom_bar(
+                ui,
+                &self.current_snapshot,
+                self.started_at,
+                self.engine_running,
+                t,
+            );
         });
 
         // Config side panel
@@ -762,9 +768,9 @@ impl eframe::App for JoalApp {
 
         egui::Panel::bottom("telemetry_panel")
             .resizable(true)
-            .default_size(200.0)
+            .default_size(160.0)
             .min_size(140.0)
-            .max_size(380.0)
+            .max_size(320.0)
             .show_inside(ui, |ui| {
                 egui::Panel::right("log_panel")
                     .resizable(true)
