@@ -108,14 +108,15 @@ impl Inner {
         for (info_hash, speed) in &mut self.download_speed_map {
             let st = stats.get(info_hash).copied().unwrap_or_default();
             let cap = totals.get(info_hash).copied().unwrap_or(0);
-            let assigned = if global_down == 0 || active_total == 0.0 || cap == 0 || st.downloaded() >= cap {
-                0
-            } else {
-                #[allow(clippy::cast_precision_loss)]
-                let global = global_down as f64;
-                let weight = weight_holder.weight_for(info_hash);
-                (global * weight / active_total) as u64
-            };
+            let assigned =
+                if global_down == 0 || active_total == 0.0 || cap == 0 || st.downloaded() >= cap {
+                    0
+                } else {
+                    #[allow(clippy::cast_precision_loss)]
+                    let global = global_down as f64;
+                    let weight = weight_holder.weight_for(info_hash);
+                    (global * weight / active_total) as u64
+                };
             speed.set_bytes_per_second(assigned);
         }
 
@@ -237,12 +238,7 @@ impl BandwidthDispatcher {
         self.with_lock(|inner| inner.poke = poke);
     }
 
-    pub fn register_torrent(
-        &self,
-        info_hash: InfoHash,
-        total_size: u64,
-        initial_completed: bool,
-    ) {
+    pub fn register_torrent(&self, info_hash: InfoHash, total_size: u64, initial_completed: bool) {
         debug!(
             info_hash = %info_hash.to_hex(),
             total_size, initial_completed,
@@ -506,7 +502,10 @@ mod tests {
     /// Build a dispatcher whose download faker is enabled and returns
     /// `dl_bytes_per_sec` from a constant source. Caller still controls the
     /// upload constant via `up_bytes_per_sec`.
-    fn dispatcher_with_download(up_bytes_per_sec: u64, dl_bytes_per_sec: u64) -> BandwidthDispatcher {
+    fn dispatcher_with_download(
+        up_bytes_per_sec: u64,
+        dl_bytes_per_sec: u64,
+    ) -> BandwidthDispatcher {
         let upload =
             RandomSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(up_bytes_per_sec)));
         let download = DownloadSpeedProvider::with_source(

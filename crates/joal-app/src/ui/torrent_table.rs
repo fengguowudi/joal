@@ -158,8 +158,8 @@ pub fn show(
         .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Seeders
         .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Leechers
         .column(egui_extras::Column::initial(128.0).at_least(118.0)) // Last announce
-        .column(egui_extras::Column::remainder().at_least(190.0)) // Health
-        .column(egui_extras::Column::initial(206.0).at_least(192.0)) // Actions
+        .column(egui_extras::Column::initial(200.0).at_least(180.0)) // Health
+        .column(egui_extras::Column::initial(184.0).at_least(168.0)) // Actions
         .header(text_height + 8.0, |mut header| {
             sortable_header(&mut header, table_state, SortColumn::Name, t.col_name);
             sortable_header(
@@ -488,10 +488,14 @@ fn sortable_header(
         } else {
             label.to_owned()
         };
+        // The header sits inside a column whose width is decided by TableBuilder.
+        // Use a min_size button so it grows with the column without depending on
+        // `ui.available_width()`, which can shift between passes when neighbouring
+        // columns reflow and triggers `Widget rect changed id between passes` warnings.
+        let min_width = (ui.available_width() - 4.0).max(64.0);
         let clicked = ui
             .push_id(("torrent_table_sort", column), |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 24.0],
+                ui.add(
                     egui::Button::new(egui::RichText::new(button_label).strong().color(
                         if active {
                             theme::tone_colors(theme::Tone::Accent).fg
@@ -519,7 +523,8 @@ fn sortable_header(
                     ))
                     .corner_radius(egui::CornerRadius::same(5))
                     .selected(active)
-                    .frame_when_inactive(true),
+                    .frame_when_inactive(true)
+                    .min_size(egui::vec2(min_width, 24.0)),
                 )
                 .clicked()
             })
@@ -799,6 +804,78 @@ mod tests {
         assert!(
             !contains_id_warning_shape(&output.shapes),
             "expected no debug warning shapes after a discarded-pass filter change",
+        );
+    }
+
+    #[test]
+    fn data_update_across_discarded_pass_keeps_widget_ids_stable() {
+        // Reproduces the runtime warning class from `wrong.txt`: a tracker
+        // announce returns new seeders / leechers / speed values, the egui
+        // multi-pass layout re-runs, and the row widgets must keep stable ids
+        // even though their displayed text changed character count between
+        // passes (e.g. "0 B/s" -> "120.5 KB/s").
+        let ctx = egui::Context::default();
+        let mut alpha = torrent("Alpha", 0x11);
+        alpha.last_known_seeders = Some(5);
+        alpha.last_known_leechers = Some(3);
+        alpha.current_speed_bps = 0;
+
+        let mut beta = torrent("Beta", 0x22);
+        beta.consecutive_fails = 1;
+        beta.last_known_seeders = Some(2);
+        beta.last_known_leechers = Some(0);
+        beta.current_speed_bps = 1024;
+
+        let mut snapshot = EngineSnapshot {
+            active_client_filename: "utorrent-3.5.0_43916.client".to_owned(),
+            global_upload_speed_bps: 0,
+            global_download_speed_bps: 0,
+            torrents: vec![alpha, beta],
+        };
+        let mut pending_delete = None;
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let mut table_state = TableState::default();
+        let mut first_pass = true;
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+
+        let output = ctx.run_ui(raw_input, |ui| {
+            show(
+                ui,
+                &mut snapshot,
+                &mut pending_delete,
+                &cmd_tx,
+                &mut table_state,
+                tr(Language::Chinese),
+            );
+            if first_pass {
+                first_pass = false;
+                // Simulate a tracker update arriving between passes — speeds
+                // and seeder/leecher counts mutate so several cell label
+                // widths shift, but the row slot ids must stay anchored.
+                for torrent in &mut snapshot.torrents {
+                    torrent.current_speed_bps = torrent.current_speed_bps.saturating_add(120_000);
+                    torrent.current_download_speed_bps =
+                        torrent.current_download_speed_bps.saturating_add(35_000);
+                    torrent.uploaded_bytes = torrent.uploaded_bytes.saturating_add(2_500_000);
+                    torrent.downloaded_bytes = torrent.downloaded_bytes.saturating_add(1_200_000);
+                    torrent.last_known_seeders =
+                        Some(torrent.last_known_seeders.unwrap_or(0).saturating_add(4));
+                    torrent.last_known_leechers =
+                        Some(torrent.last_known_leechers.unwrap_or(0).saturating_add(7));
+                }
+                ui.ctx().request_discard("simulate snapshot update");
+            }
+        });
+
+        assert!(
+            !contains_id_warning_shape(&output.shapes),
+            "expected no debug warning shapes after a discarded-pass data update",
         );
     }
 

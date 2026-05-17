@@ -255,16 +255,31 @@ Grep check before committing: `rg '\.unwrap\(\)' rust/crates/ --glob '!tests/**'
 **Fix (convention)**:
 - Give interactive inputs explicit ids: `TextEdit::id_salt(...)`, `ComboBox::from_id_salt(...)`, `ui.push_id(...)`.
 - For row/slot-based layouts whose visual identity is the screen position (tables, sortable headers, action slots), scope ids by the stable slot key (`row.index()`, column name, toolbar slot), not by domain data that can move to another rect inside the same frame.
-- Add a regression test when the view is non-trivial: mutate the UI state between passes with `request_discard(...)` and assert the output contains no red debug warning rects.
+- When a small reusable helper (`metric`, `badge`, `chip`, status strip) renders **live data**, the outer `push_id(id, ...)` wrapper is NOT enough — every inner widget whose text mutates frame-to-frame needs its own static-string `push_id` too. Auto-generated child ids derive from the parent counter and the cached rect; once the value text changes (`"0 B/s"` → `"1.2 KB/s"`) the rect width shifts a sub-pixel and the cached id no longer matches.
+- `ui.add_sized([ui.available_width(), ...], ...)` is the same trap as `ui.add_sized([fixed, ...], ...)` for multi-pass id stability — the size argument participates in id derivation, and `ui.available_width()` can differ by sub-pixel amounts across passes when sibling columns reflow. Read `ui.available_width()` once, then use `Button::min_size(egui::vec2(min_width, ..))` so egui derives the id from the button itself and lets the layout decide the final width.
+- The regression suite needs **both** flavours of discarded-pass test: a toggle-driven one (`filter_toggle_across_discarded_pass_keeps_widget_ids_stable`) where the user flips state between passes, **and** a data-update one (`data_update_across_discarded_pass_keeps_widget_ids_stable`) where snapshot fields (speed, uploaded, seeders, leechers) mutate without any user action. The runtime warning class from `wrong.txt` came from the second path — a single toggle test does not exercise it.
 
 ```rust
-fn cell_scope<R>(
-    ui: &mut egui::Ui,
-    row_index: usize,
-    key: &'static str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    ui.push_id((row_index, key), add_contents).inner
+pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: impl ToString, tone: Tone) {
+    let colors = tone_colors(tone);
+    let value = value.to_string();
+    ui.push_id(id, |ui| {                              // outer slot id
+        Frame::new()
+            .fill(colors.bg)
+            .stroke(Stroke::new(1.0, colors.stroke))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if !label.is_empty() {
+                        ui.push_id("metric_label", |ui| {    // inner static id
+                            ui.add(Label::new(label).truncate());
+                        });
+                    }
+                    ui.push_id("metric_value", |ui| {        // inner static id — value mutates
+                        ui.add(Label::new(value).truncate());
+                    });
+                });
+            });
+    });
 }
 
 #[test]
@@ -277,11 +292,39 @@ fn filter_toggle_across_discarded_pass_keeps_widget_ids_stable() {
     });
     assert!(!contains_id_warning_shape(&output.shapes));
 }
+
+#[test]
+fn data_update_across_discarded_pass_keeps_widget_ids_stable() {
+    // Reproduces the runtime warning class from `wrong.txt`: a tracker
+    // announce returns new seeders / leechers / speed values, egui re-runs
+    // the multi-pass layout, and the row widgets must keep stable ids even
+    // though their text width shifted (e.g. "0 B/s" -> "120.5 KB/s").
+    let ctx = egui::Context::default();
+    let mut snapshot = /* ... */;
+    let mut first_pass = true;
+    let output = ctx.run_ui(raw_input, |ui| {
+        show(ui, &mut snapshot, &mut pending_delete, &cmd_tx, &mut table_state, tr(Language::Chinese));
+        if first_pass {
+            first_pass = false;
+            for torrent in &mut snapshot.torrents {
+                torrent.current_speed_bps = torrent.current_speed_bps.saturating_add(120_000);
+                torrent.uploaded_bytes = torrent.uploaded_bytes.saturating_add(2_500_000);
+                torrent.last_known_seeders =
+                    Some(torrent.last_known_seeders.unwrap_or(0).saturating_add(4));
+                torrent.last_known_leechers =
+                    Some(torrent.last_known_leechers.unwrap_or(0).saturating_add(7));
+            }
+            ui.ctx().request_discard("simulate snapshot update");
+        }
+    });
+    assert!(!contains_id_warning_shape(&output.shapes));
+}
 ```
 
 **Why this over alternatives**:
 - Turning off multi-pass (`max_passes = 1`) hides the warning but keeps the layout glitch.
 - Using torrent-specific ids for row widgets makes the warning worse when sorting/filtering moves the torrent to a new rect inside the same frame.
+- Pinning only the outer wrapper id and trusting auto-generated inner ids works for static helpers but breaks the moment the helper is reused for live data — the data-update test is the only thing that catches that regression class before users see red rects in the log.
 - A discarded-pass regression test catches the bug class without needing a live GUI.
 
 ### Convention: localized egui controls must not hard-code label width
@@ -293,6 +336,7 @@ fn filter_toggle_across_discarded_pass_keeps_widget_ids_stable() {
 **Fix (convention)**:
 - For clickable controls, prefer `Button::min_size(...)` over `ui.add_sized([fixed_width, ...], ...)` so the control keeps a minimum footprint but can still grow when the localized string is longer.
 - For text-bearing controls that can surface user or filesystem data, opt into truncation explicitly: `Button::truncate()`, `Label::truncate()`, `ComboBox::truncate()`.
+- `ui.set_max_width(...)` on a label that already uses `.truncate()` is redundant and can leave dead space inside `horizontal_wrapped` — drop the cap and rely on truncation + hover_text instead.
 - Keep the tint/background subtle for semantic widgets; reserve stronger colors for the text/border so truncated controls stay readable on light surfaces.
 - When a value can be much longer than the label (`client`, torrent name, log line), attach hover text to the truncated control so the full value is still discoverable.
 

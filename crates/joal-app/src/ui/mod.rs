@@ -580,7 +580,7 @@ impl eframe::App for JoalApp {
             status_bar::top_bar(ui, &self.current_snapshot, self.engine_running, t);
             ui.add_space(10.0);
             theme::panel_frame().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     let engine_label = if self.engine_running { t.stop } else { t.start };
                     let engine_tone = if self.engine_running {
                         theme::Tone::Danger
@@ -640,31 +640,36 @@ impl eframe::App for JoalApp {
                         }
                     }
 
-                    let announce_response = ui.push_id("announce_all_button", |ui| {
-                        ui.add_enabled(
-                            self.engine_running,
-                            toolbar_button(
-                                t.announce_all_now,
-                                theme::Tone::Info,
-                                self.engine_running,
-                            )
-                            .min_size(egui::vec2(148.0, 30.0)),
-                        )
-                    });
-                    if announce_response.inner.clicked() {
+                    if toolbar_action_enabled(
+                        ui,
+                        "announce_all_button",
+                        toolbar_button(t.announce_all_now, theme::Tone::Info, self.engine_running),
+                        148.0,
+                        self.engine_running,
+                    )
+                    .clicked()
+                    {
                         self.send_command(EngineCommand::AnnounceAllNow);
                     }
 
-                    let language_toggle_clicked = toolbar_action(
-                        ui,
-                        "language_toggle_button",
-                        toolbar_button(self.language.toggle().label(), theme::Tone::Neutral, false),
-                        68.0,
-                    )
-                    .clicked();
-                    if language_toggle_clicked {
-                        self.language = self.language.toggle();
-                    }
+                    // Push the language toggle to the far right so the toolbar
+                    // feels deliberately laid out instead of bunched on the left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let language_toggle_clicked = toolbar_action(
+                            ui,
+                            "language_toggle_button",
+                            toolbar_button(
+                                self.language.toggle().label(),
+                                theme::Tone::Neutral,
+                                false,
+                            ),
+                            68.0,
+                        )
+                        .clicked();
+                        if language_toggle_clicked {
+                            self.language = self.language.toggle();
+                        }
+                    });
                 });
             });
         });
@@ -757,13 +762,14 @@ impl eframe::App for JoalApp {
 
         egui::Panel::bottom("telemetry_panel")
             .resizable(true)
-            .default_size(220.0)
-            .min_size(160.0)
+            .default_size(200.0)
+            .min_size(140.0)
+            .max_size(380.0)
             .show_inside(ui, |ui| {
-                egui::Panel::bottom("log_panel")
+                egui::Panel::right("log_panel")
                     .resizable(true)
-                    .default_size(110.0)
-                    .min_size(80.0)
+                    .default_size(420.0)
+                    .min_size(280.0)
                     .show_inside(ui, |ui| {
                         log_panel::show(
                             ui,
@@ -857,6 +863,22 @@ fn toolbar_action(
 ) -> egui::Response {
     ui.push_id(id, |ui| {
         ui.add(button.min_size(egui::vec2(min_width, 30.0)))
+    })
+    .inner
+}
+
+/// Toolbar action variant that toggles the enabled state. The inner `add_enabled`
+/// keeps the same `push_id`-wrapped layout as `toolbar_action`, so the button's
+/// id stays stable when the enabled flag flips (e.g. engine start/stop).
+fn toolbar_action_enabled(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    button: egui::Button<'_>,
+    min_width: f32,
+    enabled: bool,
+) -> egui::Response {
+    ui.push_id(id, |ui| {
+        ui.add_enabled(enabled, button.min_size(egui::vec2(min_width, 30.0)))
     })
     .inner
 }

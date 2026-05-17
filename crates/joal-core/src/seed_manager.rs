@@ -550,7 +550,9 @@ fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
         let stats = deps
             .bandwidth
             .get_seed_stat_for_torrent(&snap.torrent_info_hash);
-        let initial_completed = deps.state_store.is_initial_completed(&snap.torrent_info_hash);
+        let initial_completed = deps
+            .state_store
+            .is_initial_completed(&snap.torrent_info_hash);
         torrents.push(TorrentStatus {
             info_hash: snap.torrent_info_hash,
             name: snap.torrent_name,

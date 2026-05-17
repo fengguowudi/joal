@@ -383,7 +383,11 @@ mod tests {
             RandomSpeedProvider::new(&cfg),
             DownloadSpeedProvider::new(&cfg),
         ));
-        dispatcher.register_torrent(sample_torrent().info_hash, sample_torrent().total_size, false);
+        dispatcher.register_torrent(
+            sample_torrent().info_hash,
+            sample_torrent().total_size,
+            false,
+        );
         AnnounceDataAccessor::new(
             Arc::new(qb_client()),
             dispatcher,

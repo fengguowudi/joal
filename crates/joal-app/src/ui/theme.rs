@@ -147,10 +147,12 @@ pub(super) fn badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::symmetric(8, 4))
             .show(ui, |ui| {
-                ui.set_max_width(220.0);
-                ui.add(
-                    Label::new(RichText::new(text).color(colors.fg).strong().small()).truncate(),
-                );
+                ui.push_id("badge_label", |ui| {
+                    ui.add(
+                        Label::new(RichText::new(text).color(colors.fg).strong().small())
+                            .truncate(),
+                    );
+                });
             });
     });
 }
@@ -165,24 +167,27 @@ pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: impl ToStri
             .corner_radius(CornerRadius::same(5))
             .inner_margin(Margin::symmetric(10, 6))
             .show(ui, |ui| {
-                ui.set_max_width(240.0);
                 ui.horizontal(|ui| {
                     if !label.is_empty() {
-                        ui.add(
-                            Label::new(RichText::new(label).small().color(text_secondary()))
-                                .truncate(),
-                        );
+                        ui.push_id("metric_label", |ui| {
+                            ui.add(
+                                Label::new(RichText::new(label).small().color(text_secondary()))
+                                    .truncate(),
+                            );
+                        });
                     }
-                    ui.add(
-                        Label::new(RichText::new(value).strong().color(
-                            if matches!(tone, Tone::Neutral) {
-                                text_primary()
-                            } else {
-                                colors.fg
-                            },
-                        ))
-                        .truncate(),
-                    );
+                    ui.push_id("metric_value", |ui| {
+                        ui.add(
+                            Label::new(RichText::new(value).strong().color(
+                                if matches!(tone, Tone::Neutral) {
+                                    text_primary()
+                                } else {
+                                    colors.fg
+                                },
+                            ))
+                            .truncate(),
+                        );
+                    });
                 });
             });
     });
