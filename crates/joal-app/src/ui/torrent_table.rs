@@ -162,19 +162,21 @@ pub fn show(
     // Make selection and active state colors a touch softer to remove the
     // chunky outlined look the old palette had.
 
-    // Sum of the columns' `at_least` widths plus the Name column's own
-    // 220px floor. Once the viewport is narrower than this, the table needs
-    // horizontal scrolling so the right-edge action cluster does not get
-    // clipped behind the viewport edge. Vertical scrolling is still handled
-    // by `TableBuilder::vscroll(true)` below — the outer `ScrollArea` here
-    // is horizontal-only so we do not double-wrap the same axis.
-    let min_table_width = 220.0
+    // Sum of the columns' `at_least` widths. Once the viewport is narrower
+    // than this, the table needs horizontal scrolling so the right-edge
+    // action cluster does not get clipped behind the viewport edge. Vertical
+    // scrolling is still handled by `TableBuilder::vscroll(true)` below — the
+    // outer `ScrollArea` here is horizontal-only so we do not double-wrap the
+    // same axis. The floors below are deliberately tight: at the default
+    // 1180x740 window the user prefers a compact layout and would rather drag
+    // the window wider than see columns greedily claim space.
+    let min_table_width = 140.0 // Name
         + 120.0 // Progress
         + 72.0 + 84.0 // Upload speed + Uploaded
         + 72.0 + 84.0 // Download speed + Downloaded
-        + 64.0 + 64.0 // Seeders + Leechers
-        + 118.0 // Last announce
-        + 180.0 // Health
+        + 44.0 + 44.0 // Seeders + Leechers
+        + 108.0 // Last announce
+        + 100.0 // Health
         + 168.0 // Actions
         + 8.0; // small slack so the last column does not touch the scrollbar
     egui::ScrollArea::horizontal()
@@ -217,16 +219,21 @@ fn build_torrent_table(
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .min_scrolled_height(available_height.max(120.0))
         .max_scroll_height(available_height.max(120.0))
-        .column(egui_extras::Column::remainder().at_least(220.0)) // Name
+        .column(
+            egui_extras::Column::initial(200.0)
+                .at_least(140.0)
+                .at_most(280.0)
+                .clip(true),
+        ) // Name
         .column(egui_extras::Column::initial(124.0).at_least(120.0)) // Progress
         .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Upload speed
         .column(egui_extras::Column::initial(92.0).at_least(84.0)) // Uploaded
         .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Download speed
         .column(egui_extras::Column::initial(92.0).at_least(84.0)) // Downloaded
-        .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Seeders
-        .column(egui_extras::Column::initial(72.0).at_least(64.0)) // Leechers
-        .column(egui_extras::Column::initial(128.0).at_least(118.0)) // Last announce
-        .column(egui_extras::Column::initial(200.0).at_least(180.0)) // Health
+        .column(egui_extras::Column::initial(56.0).at_least(44.0)) // Seeders
+        .column(egui_extras::Column::initial(56.0).at_least(44.0)) // Leechers
+        .column(egui_extras::Column::initial(116.0).at_least(108.0)) // Last announce
+        .column(egui_extras::Column::initial(110.0).at_least(100.0)) // Health
         .column(egui_extras::Column::initial(184.0).at_least(168.0)) // Actions
         .header(text_height + 12.0, |mut header| {
             sortable_header(&mut header, table_state, SortColumn::Name, t.col_name);

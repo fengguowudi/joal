@@ -144,11 +144,12 @@ fn main() -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JOAL Desktop")
-            // 1280x800 gives the torrent table room for all 11 columns without
-            // horizontal scrolling on a fresh install, while the 960x600 floor
-            // keeps the window usable on 13" laptops without letting users
-            // squish it below the point where the action cluster wraps.
-            .with_inner_size([1280.0, 800.0])
+            // 1180x740 keeps the torrent table comfortable on a fresh install
+            // (all 11 columns visible without horizontal scroll at their
+            // post-narrowing widths) without feeling oversized on a 1366x768
+            // laptop. The 960x600 floor still keeps the action cluster from
+            // wrapping on 13" panels.
+            .with_inner_size([1180.0, 740.0])
             .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };

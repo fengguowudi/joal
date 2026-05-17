@@ -673,6 +673,15 @@ impl eframe::App for JoalApp {
                 .default_size(egui::vec2(420.0, 560.0))
                 .min_width(360.0)
                 .anchor(egui::Align2::RIGHT_TOP, [-16.0, 64.0])
+                // Pin the frame explicitly so the floating config card uses our
+                // theme's surface + soft border + drop shadow combo rather than
+                // egui's theme-derived default. Without this, an earlier round
+                // shipped a state where the title-bar / body rendered with
+                // washed-out, near-invisible text on certain platforms. The
+                // body content still picks up `override_text_color` from the
+                // global theme, so labels and the title bar always paint with
+                // `text_primary` (dark ink) on top of the surface fill.
+                .frame(theme::window_frame())
                 .show(ui.ctx(), |ui| {
                     config_panel::show(
                         ui,
@@ -728,6 +737,7 @@ impl eframe::App for JoalApp {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .frame(theme::window_frame())
                 .show(ui.ctx(), |ui| {
                     ui.label(format!("{} \"{name}\"?", t.delete_prompt));
                     ui.label(t.delete_hint);

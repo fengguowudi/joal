@@ -1,6 +1,8 @@
 use std::hash::Hash;
 
-use egui::{Button, Color32, CornerRadius, Frame, Label, Margin, Response, RichText, Stroke, Ui};
+use egui::{
+    Button, Color32, CornerRadius, Frame, Label, Margin, Response, RichText, Shadow, Stroke, Ui,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -56,6 +58,13 @@ pub(super) fn apply(ctx: &egui::Context) {
     visuals.widgets.noninteractive.weak_bg_fill = panel_fill();
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(CR_INSET);
+    // All five widget states pin `fg_stroke.color` to `text_primary()` (dark
+    // slate-900). `WidgetVisuals::fg_stroke.color` is what `TextEdit` paints
+    // its actual content with (after falling through `override_text_color`)
+    // and what unhovered `ComboBox` dropdown items use — leaving any of these
+    // at the egui default (a near-white in `Visuals::dark()`, or a slate-gray
+    // mid-tone in `Visuals::light()`) would render TextEdit content and
+    // dropdown items as washed-out / invisible on our white `surface()` fill.
     visuals.widgets.noninteractive.fg_stroke.color = text_primary();
 
     visuals.widgets.inactive.bg_fill = surface();
@@ -96,9 +105,15 @@ pub(super) fn text_primary() -> Color32 {
     Color32::from_rgb(17, 24, 39)
 }
 
-/// Mid-gray, used for normal body text, table headers, and field labels.
+/// Mid-gray used for muted/secondary text (hint copy, metric labels, "no
+/// torrents" placeholders, column subtitles). Previously this returned
+/// slate-500 (`#6B7280`), but CJK body-size glyphs at slate-500 on a pure
+/// white `surface()` fill read as washed-out / "white-on-white" even though
+/// the WCAG contrast number nominally passed. Bumping to slate-600
+/// (`#475569`) keeps the muted-vs-primary visual hierarchy intact while
+/// crossing the perceived-weight threshold for legibility on `#FFFFFF`.
 pub(super) fn text_secondary() -> Color32 {
-    Color32::from_rgb(107, 114, 128)
+    Color32::from_rgb(71, 85, 105)
 }
 
 /// Light-gray, used for auxiliary metadata (timestamps, "Interval ...",
@@ -139,6 +154,31 @@ pub(super) fn panel_frame() -> Frame {
         .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::same(CR_PANEL))
         .inner_margin(Margin::symmetric(16, 16))
+}
+
+/// Frame for the floating config `egui::Window`. We override egui's default
+/// `Frame::window` so the surface fill and stroke come from our explicit theme
+/// values rather than whatever the theme-derived defaults produce — earlier
+/// rounds shipped a state where the window rendered white-on-white in some
+/// configurations, and pinning the frame at the call site removes that whole
+/// failure mode regardless of which theme path egui resolves.
+///
+/// Mirrors `panel_frame()`'s surface (white + `CR_PANEL` rounding) so the
+/// floating window reads as the same kind of "card" as the central torrent
+/// table panel, but adds a 1px `soft_border` stroke and a soft drop shadow so
+/// it visually lifts off the page when overlaid on top of the central panel.
+pub(super) fn window_frame() -> Frame {
+    Frame::new()
+        .fill(surface())
+        .stroke(Stroke::new(1.0, soft_border()))
+        .corner_radius(CornerRadius::same(CR_PANEL))
+        .inner_margin(Margin::same(12))
+        .shadow(Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(20),
+        })
 }
 
 /// Edge-to-edge strip frame: square corners, configurable fill. Used for the
@@ -336,24 +376,33 @@ pub(super) fn primary_button_enabled(
             .corner_radius(CornerRadius::same(CR_INSET))
             .min_size(min_size);
 
-        // Override widget visuals inside this scope so hover/active also stay
-        // on a single primary hue (no light-gray hover bleed-through).
-        let mut visuals = ui.visuals().clone();
-        visuals.widgets.inactive.bg_fill = bg;
-        visuals.widgets.inactive.weak_bg_fill = bg;
-        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-        visuals.widgets.inactive.fg_stroke.color = Color32::WHITE;
-        visuals.widgets.hovered.bg_fill = bg_hover;
-        visuals.widgets.hovered.weak_bg_fill = bg_hover;
-        visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-        visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-        visuals.widgets.active.bg_fill = bg_active;
-        visuals.widgets.active.weak_bg_fill = bg_active;
-        visuals.widgets.active.bg_stroke = Stroke::NONE;
-        visuals.widgets.active.fg_stroke.color = Color32::WHITE;
-
+        // Override widget visuals on the SCOPED child Ui (via
+        // `ui.visuals_mut()`) so hover/active also stay on a single primary
+        // hue (no light-gray hover bleed-through). An earlier revision used
+        // `ui.ctx().set_visuals(...)`, which mutates the global Context style
+        // and therefore persists across frames — once the primary button
+        // painted once, every subsequent `TextEdit` and unhovered ComboBox
+        // dropdown item would render white because
+        // `widgets.inactive.fg_stroke.color` had been clobbered to
+        // `Color32::WHITE` for the button's own text. Using `visuals_mut()`
+        // inside a `scope` keeps the override local to this child Ui (the
+        // child's `Arc<Style>` is cloned on write and dropped when the scope
+        // ends), so the parent Ui — and every later frame — still see the
+        // dark widget text colors set in `theme::apply`.
         ui.scope(|ui| {
-            ui.ctx().set_visuals(visuals);
+            let visuals = ui.visuals_mut();
+            visuals.widgets.inactive.bg_fill = bg;
+            visuals.widgets.inactive.weak_bg_fill = bg;
+            visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+            visuals.widgets.inactive.fg_stroke.color = Color32::WHITE;
+            visuals.widgets.hovered.bg_fill = bg_hover;
+            visuals.widgets.hovered.weak_bg_fill = bg_hover;
+            visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+            visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
+            visuals.widgets.active.bg_fill = bg_active;
+            visuals.widgets.active.weak_bg_fill = bg_active;
+            visuals.widgets.active.bg_stroke = Stroke::NONE;
+            visuals.widgets.active.fg_stroke.color = Color32::WHITE;
             ui.add_enabled(enabled, button)
         })
         .inner

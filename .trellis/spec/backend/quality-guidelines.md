@@ -420,6 +420,26 @@ egui::ComboBox::from_id_salt("client_combo")
 - Painting a "fake primary" with `Button::fill(theme::accent())` instead of using `primary_button`. The helper exists precisely to keep the primary-button look in one place; ad-hoc copies drift.
 - Putting more than one `primary_button` on the same panel/dialog. The visual contract is "one primary action per surface".
 
+### Convention: per-widget visuals overrides use `ui.visuals_mut()`, never `ui.ctx().set_visuals(...)`
+
+**What**: When a widget helper (button face, badge, tinted frame) needs to override `egui::Visuals` for the duration of a single paint, the override goes through `ui.visuals_mut()` on the child `Ui`. `egui::Context::set_visuals(...)` is reserved for the one-time theme bootstrap in `theme::apply` — it must never appear inside a per-widget helper.
+
+**Why**:
+- `Context::set_visuals(...)` mutates the **persistent global style** on the `egui::Context`. There is no scope guard: `ui.scope(...)` builds a child `Ui` but does NOT snapshot/restore the Context's global style on drop. So the moment a frame paints a widget that called `ctx().set_visuals(...)`, every subsequent frame in the same session runs with the overridden style.
+- The concrete regression this convention codifies: a `theme::primary_button_enabled` helper used `ctx().set_visuals(...)` to flip `widgets.inactive.fg_stroke.color` to white for the duration of one button paint. After the first frame, every `TextEdit`'s typed content rendered white-on-white (invisible) and every unhovered `ComboBox` popup item was invisible too. The bug was global, persistent for the rest of the process, and only surfaced after a UI surface that uses primary buttons had been visited at least once.
+- `ui.visuals_mut()` returns `&mut Visuals` derived from the child `Ui`'s `Arc<Style>` via clone-on-write. The override applies only while that child `Ui` is alive; when the `Ui` drops, the parent's style is untouched. This is the correct API for per-paint visuals overrides in egui.
+
+**Fix (convention)**:
+- Inside any button/badge/frame helper in `crates/joal-app/src/ui/theme.rs`, mutate visuals via `ui.visuals_mut()` (or `ui.scope(|ui| { ui.visuals_mut().widgets.inactive.fg_stroke.color = ...; /* paint */ })` when you need an extra scope boundary for unrelated reasons).
+- `egui::Context::set_visuals(...)` is permitted **only** in `theme::apply(ctx)` at app startup, where mutating the global style is the intended effect.
+- If a helper needs to read the current visuals before overriding, clone from `ui.visuals()` (immutable) and assign the mutated copy through `*ui.visuals_mut() = overridden;`. Do not route the assignment through the `Context`.
+- See also `Convention: egui discarded-pass UI must pin widget ids explicitly` — per-widget helpers must satisfy both rules: stable ids AND scoped visuals.
+
+**Anti-patterns**:
+- `ui.ctx().set_visuals(overridden)` followed by `ui.scope(|ui| { /* paint */ })`. The `scope` does nothing to restore the global style; the override leaks forever.
+- "I'll just call `ctx().set_visuals(original)` again after painting to reset it." This works if and only if nothing between the two calls panics, returns early, or skips the helper. It also defeats `Arc<Style>` sharing because every paint forces a global write. Use `ui.visuals_mut()` instead — it is structurally impossible to leak.
+- Reading `ui.visuals()` (immutable) and forgetting that mutating the clone has no effect until it is written back through `*ui.visuals_mut() = ...`. The clone-on-write semantics live on `visuals_mut`, not on `visuals`.
+
 ### Convention: hero surface owns `CentralPanel`; auxiliaries are resizable `TopBottomPanel`s in strict order
 
 **What**: The desktop layout in `crates/joal-app/src/ui/mod.rs` follows a fixed Panel order so the torrent table — the app's hero surface — automatically claims all remaining vertical space:

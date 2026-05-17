@@ -24,12 +24,11 @@ pub fn show(
     let t = view.t;
     let mut edited = false;
 
-    ui.heading(
-        egui::RichText::new(t.configuration)
-            .strong()
-            .color(theme::text_primary()),
-    );
-    ui.add_space(8.0);
+    // No body heading here — the `egui::Window::new(t.configuration)` title
+    // bar already shows the same string, so a duplicate body heading would
+    // just stack the word twice at the top of the card. The first inset
+    // frame below provides its own top margin so removing the heading does
+    // not push the form against the title bar.
     theme::inset_frame().show(ui, |ui| {
         edited |= show_config_grid(ui, state, view.available_clients, t);
     });
@@ -44,10 +43,16 @@ pub fn show(
         edited |= show_proxy_grid(ui, state, t);
     });
     ui.add_space(10.0);
+    // Hint stays at `text_secondary()` because it is secondary/auxiliary
+    // information that should not compete with the form labels for emphasis.
+    // The helper itself was bumped from slate-500 (`#6B7280`, perceived as
+    // pale on `#FFFFFF`) to slate-600 (`#475569`) — see the doc comment on
+    // `theme::text_secondary()`. All other Window content (Window title bar,
+    // section headings, form labels, checkbox label) uses `text_primary()`.
     ui.label(
         egui::RichText::new(t.tip_ratio)
             .small()
-            .color(theme::text_tertiary()),
+            .color(theme::text_secondary()),
     );
     ui.add_space(8.0);
     show_feedback(ui, &view);
@@ -145,12 +150,17 @@ fn show_config_grid(
             // Empty left cell — the checkbox row reuses the label slot for the
             // checkbox itself so clicking the i18n text toggles the value
             // (previously the label sat in column 1 and was not clickable).
+            // The label is wrapped in an explicit `RichText::new(...).color(
+            // text_primary())` so it picks up the same dark ink as
+            // `field_label` regardless of whether `override_text_color` is
+            // honored by `ui.checkbox`'s internal `WidgetText` path on every
+            // platform.
             ui.label("");
             edited |= ui
                 .push_id("config_keep_zero_leecher", |ui| {
                     ui.checkbox(
                         &mut state.keep_torrent_with_zero_leechers,
-                        t.keep_zero_leecher,
+                        egui::RichText::new(t.keep_zero_leecher).color(theme::text_primary()),
                     )
                 })
                 .inner
@@ -229,7 +239,18 @@ fn show_feedback(ui: &mut egui::Ui, view: &ConfigPanelView<'_>) {
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(theme::text_secondary()));
+    // Form labels intentionally use `text_primary()` (near-black `#111827`,
+    // slate-900) so every label in the Window paints with the same dark ink
+    // regardless of locale. An earlier iteration used `text_secondary()`
+    // (`#6B7280` slate-500), but CJK glyphs at body size on a pure white
+    // `surface()` fill read as washed-out / near-invisible — the raw contrast
+    // number passed WCAG AA but the perceived weight did not. Section
+    // headings and the Window title bar all already use `text_primary()`;
+    // keeping field labels at the same ink keeps the whole form legible
+    // regardless of locale. The hint at the bottom is the only surviving
+    // `text_secondary()` use inside the Window, and that helper is now
+    // slate-600 (see `theme::text_secondary()`).
+    ui.label(egui::RichText::new(text).color(theme::text_primary()));
 }
 
 fn config_text_field<'a>(
