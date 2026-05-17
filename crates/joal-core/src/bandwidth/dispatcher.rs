@@ -1,13 +1,18 @@
 //! Periodic bandwidth dispatcher.
 //!
-//! Port of Java `org.araymond.joal.core.bandwith.BandwidthDispatcher`.
+//! Originally a port of Java `org.araymond.joal.core.bandwith.BandwidthDispatcher`,
+//! which re-sampled the global upload budget once every 20 minutes and kept
+//! the value frozen in between. The Rust port replaces that with a
+//! **per-tick reflected random walk** ([`RandomSpeedProvider::step`]) so the
+//! global speed evolves continuously — there are no more long flat plateaus
+//! between refreshes.
 //!
 //! On every tick the dispatcher:
-//! 1. counts against a 20-minute refresh boundary and, when the boundary is
-//!    reached, re-samples the global upload budget via
-//!    [`RandomSpeedProvider::refresh`] and reshards it across torrents;
-//! 2. credits each registered torrent with `current_speed * tick_ms / 1000`
-//!    into its [`TorrentSeedStats::uploaded`] counter.
+//! 1. advances the upload + download speed providers by one walk step;
+//! 2. resplits the global budgets across registered torrents via
+//!    [`Inner::recompute_speeds`];
+//! 3. credits each torrent with `current_speed * tick_ms / 1000` into its
+//!    [`TorrentSeedStats::uploaded`] / `downloaded` counters.
 //!
 //! # Concurrency model
 //!
@@ -35,11 +40,6 @@ use crate::bandwidth::weight::{PeersAwareWeightCalculator, WeightHolder};
 use crate::snapshot::MergerPoke;
 use crate::torrent::InfoHash;
 
-/// Java `TWENTY_MINS_MS = MINUTES.toMillis(20)` — how often the global
-/// bandwidth budget is re-sampled from [`RandomSpeedProvider`].
-#[allow(clippy::duration_suboptimal_units)]
-pub const DEFAULT_BANDWIDTH_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
-
 /// Lifecycle errors for [`BandwidthDispatcher::start`] / [`BandwidthDispatcher::stop`].
 #[derive(Debug, Error)]
 pub enum BandwidthError {
@@ -61,8 +61,6 @@ struct Inner {
     download_speed_map: HashMap<InfoHash, Speed>,
     random_speed_provider: RandomSpeedProvider,
     download_speed_provider: DownloadSpeedProvider,
-    tick_counter: u64,
-    ticks_per_refresh: u64,
     poke: Option<mpsc::Sender<MergerPoke>>,
 }
 
@@ -185,31 +183,16 @@ pub struct BandwidthDispatcher {
 }
 
 impl BandwidthDispatcher {
-    /// Build a dispatcher using the default 20-minute refresh cadence.
+    /// Build a dispatcher. The global upload/download speeds are evolved by a
+    /// per-tick reflected random walk; there is no longer a periodic full
+    /// re-sample (Java's 20-minute boundary). Call
+    /// [`Self::refresh_current_bandwidth`] to force a manual full re-sample.
     #[must_use]
     pub fn new(
         tick_period: Duration,
         random_speed_provider: RandomSpeedProvider,
         download_speed_provider: DownloadSpeedProvider,
     ) -> Self {
-        Self::with_refresh_interval(
-            tick_period,
-            random_speed_provider,
-            download_speed_provider,
-            DEFAULT_BANDWIDTH_REFRESH_INTERVAL,
-        )
-    }
-
-    /// Explicit refresh cadence — useful for tests that want to verify the
-    /// 20-minute boundary without running for 20 minutes.
-    #[must_use]
-    pub fn with_refresh_interval(
-        tick_period: Duration,
-        random_speed_provider: RandomSpeedProvider,
-        download_speed_provider: DownloadSpeedProvider,
-        refresh_interval: Duration,
-    ) -> Self {
-        let ticks_per_refresh = compute_ticks_per_refresh(tick_period, refresh_interval);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 weight_holder: WeightHolder::new(PeersAwareWeightCalculator::new()),
@@ -219,8 +202,6 @@ impl BandwidthDispatcher {
                 download_speed_map: HashMap::new(),
                 random_speed_provider,
                 download_speed_provider,
-                tick_counter: 0,
-                ticks_per_refresh,
                 poke: None,
             })),
             tick_period,
@@ -337,8 +318,10 @@ impl BandwidthDispatcher {
         });
     }
 
-    /// Java `refreshCurrentBandwidth` — re-sample and recompute immediately.
-    /// Used by the 20-minute tick boundary and exposed for tests.
+    /// Force a full re-sample of both speed providers and recompute the
+    /// per-torrent budget split. The walk continues from the freshly-sampled
+    /// position. Useful for tests and for "jump to a new random starting
+    /// point" semantics (e.g. after a major config change).
     pub fn refresh_current_bandwidth(&self) {
         self.with_lock(|inner| {
             inner.random_speed_provider.refresh();
@@ -427,38 +410,18 @@ impl Drop for BandwidthDispatcher {
 
 fn on_tick(inner: &Mutex<Inner>, tick_ms: u64) {
     let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.tick_counter = guard.tick_counter.wrapping_add(1);
-    if guard.tick_counter >= guard.ticks_per_refresh {
-        guard.tick_counter = 0;
-        guard.random_speed_provider.refresh();
-        guard.download_speed_provider.refresh();
-        guard.recompute_speeds();
-        debug!("bandwidth dispatcher refreshed global bandwidth");
-    }
+    guard.random_speed_provider.step();
+    guard.download_speed_provider.step();
+    // recompute_speeds already emits a SpeedRecomputed poke when a sender
+    // is attached, so no trailing poke is needed — the merger picks up the
+    // updated `uploaded` from the same lock window.
+    guard.recompute_speeds();
     guard.accumulate_traffic(tick_ms);
-    if let Some(sender) = guard.poke.as_ref() {
-        // try_send: a dropped poke collapses into the next one because
-        // the merger always rebuilds from current state. On a 20-min
-        // boundary tick this is the second send (recompute_speeds
-        // already pushed one); the merger coalesces, so don't dedupe.
-        let _ = sender.try_send(MergerPoke::SpeedRecomputed);
-    }
-}
-
-fn compute_ticks_per_refresh(tick_period: Duration, refresh_interval: Duration) -> u64 {
-    let tick_ms = u64::try_from(tick_period.as_millis()).unwrap_or(u64::MAX);
-    let refresh_ms = u64::try_from(refresh_interval.as_millis()).unwrap_or(u64::MAX);
-    if tick_ms == 0 {
-        return 1;
-    }
-    (refresh_ms / tick_ms).max(1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::bandwidth::random_speed::{
         DownloadSpeedProvider, RandomSpeedProvider, RandomSpeedSource,
@@ -493,23 +456,32 @@ mod tests {
     }
 
     fn dispatcher(bytes_per_sec: u64) -> BandwidthDispatcher {
+        // Pin the upload band to the constant so step()'s reflected walk is
+        // a no-op (min == max ⇒ speed stays at the boundary). Lets the
+        // existing arithmetic-focused tests keep their fixed-speed assertions.
+        let kib = bytes_per_sec / 1000;
         let provider =
-            RandomSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(bytes_per_sec)));
-        let dl = DownloadSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(0)));
+            RandomSpeedProvider::with_source(&cfg(kib, kib), Box::new(Constant(bytes_per_sec)));
+        let dl = DownloadSpeedProvider::with_source(&cfg(kib, kib), Box::new(Constant(0)));
         BandwidthDispatcher::new(Duration::from_secs(1), provider, dl)
     }
 
     /// Build a dispatcher whose download faker is enabled and returns
     /// `dl_bytes_per_sec` from a constant source. Caller still controls the
-    /// upload constant via `up_bytes_per_sec`.
+    /// upload constant via `up_bytes_per_sec`. Both bands are pinned to the
+    /// constants so step() walks are no-ops in these arithmetic tests.
     fn dispatcher_with_download(
         up_bytes_per_sec: u64,
         dl_bytes_per_sec: u64,
     ) -> BandwidthDispatcher {
-        let upload =
-            RandomSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(up_bytes_per_sec)));
+        let up_kib = up_bytes_per_sec / 1000;
+        let dl_kib = dl_bytes_per_sec / 1000;
+        let upload = RandomSpeedProvider::with_source(
+            &cfg(up_kib, up_kib),
+            Box::new(Constant(up_bytes_per_sec)),
+        );
         let download = DownloadSpeedProvider::with_source(
-            &cfg_with_download(50, 100),
+            &cfg_with_download(dl_kib, dl_kib),
             Box::new(Constant(dl_bytes_per_sec)),
         );
         BandwidthDispatcher::new(Duration::from_secs(1), upload, download)
@@ -610,52 +582,46 @@ mod tests {
     }
 
     #[test]
-    fn tick_counter_triggers_refresh_at_boundary() {
+    fn speed_evolves_every_tick_via_random_walk_step() {
         #[derive(Debug)]
-        struct Seq {
-            idx: AtomicUsize,
-            values: Vec<u64>,
+        struct DeltaSeq {
+            initial: u64,
+            deltas: Mutex<Vec<i64>>,
         }
-        impl RandomSpeedSource for Seq {
+        impl DeltaSeq {
+            fn new(initial: u64, deltas: Vec<i64>) -> Self {
+                Self {
+                    initial,
+                    deltas: Mutex::new(deltas.into_iter().rev().collect()),
+                }
+            }
+        }
+        impl RandomSpeedSource for DeltaSeq {
             fn sample(&self, _: u64, _: u64) -> u64 {
-                let i = self.idx.fetch_add(1, Ordering::SeqCst);
-                *self
-                    .values
-                    .get(i)
-                    .unwrap_or_else(|| self.values.last().expect("non-empty"))
+                self.initial
+            }
+            fn sample_delta(&self, _max_abs: u64) -> i64 {
+                self.deltas.lock().unwrap().pop().unwrap_or(0)
             }
         }
 
-        let source = Box::new(Seq {
-            idx: AtomicUsize::new(0),
-            values: vec![1_000, 2_000, 3_000],
-        });
+        let source = Box::new(DeltaSeq::new(150_000, vec![500, -700, 1_000]));
         let provider = RandomSpeedProvider::with_source(&cfg(100, 200), source);
         let dl = DownloadSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(0)));
-        let d = BandwidthDispatcher::with_refresh_interval(
-            Duration::from_secs(1),
-            provider,
-            dl,
-            Duration::from_secs(2), // refresh every 2 ticks
-        );
+        let d = BandwidthDispatcher::new(Duration::from_secs(1), provider, dl);
         let a = hash(1);
         d.register_torrent(a.clone(), 0, false);
         d.update_torrent_peers(a.clone(), 10, 10);
 
-        // Initial provider refresh during construction pulled the first value.
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 1_000);
+        // Construction seeds the provider via sample(), not step(): initial value.
+        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_000);
 
-        d.tick_once_for_test(); // counter=1 < 2, no refresh
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 1_000);
-
-        d.tick_once_for_test(); // counter=2, refresh -> value 2_000
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 2_000);
-
-        d.tick_once_for_test(); // counter=1 again
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 2_000);
-
-        d.tick_once_for_test(); // counter=2, refresh -> value 3_000
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 3_000);
+        d.tick_once_for_test(); // 150_000 + 500
+        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_500);
+        d.tick_once_for_test(); // 150_500 - 700
+        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 149_800);
+        d.tick_once_for_test(); // 149_800 + 1_000
+        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_800);
     }
 
     #[tokio::test]
@@ -684,9 +650,9 @@ mod tests {
 
     #[tokio::test]
     async fn tick_pokes_merger_for_live_uploaded_refresh() {
-        // Default 20-min refresh interval -> 1200 ticks per refresh; three
-        // ticks below cannot cross the boundary, so each poke is from the
-        // post-accumulate path, not the boundary recompute.
+        // Every tick walks the speed and recomputes, which emits exactly one
+        // SpeedRecomputed poke; the trailing end-of-tick poke was dropped
+        // because recompute_speeds already covers the merger's needs.
         let d = dispatcher(500_000);
         let a = hash(1);
         d.register_torrent(a.clone(), 0, false);
@@ -824,29 +790,5 @@ mod tests {
         d.stop().await.expect("stop");
         let task = d.task.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(task.is_none());
-    }
-
-    #[test]
-    #[allow(clippy::duration_suboptimal_units)]
-    fn compute_ticks_per_refresh_matches_java_division() {
-        // Java: TWENTY_MINS_MS (1_200_000) / threadPauseIntervalMs (1000) = 1200.
-        assert_eq!(
-            compute_ticks_per_refresh(Duration::from_secs(1), Duration::from_secs(20 * 60)),
-            1200,
-        );
-        assert_eq!(
-            compute_ticks_per_refresh(Duration::from_millis(500), Duration::from_secs(10)),
-            20,
-        );
-        // Tick >= refresh: clamp to 1 to avoid zero-divide "never refresh" bug.
-        assert_eq!(
-            compute_ticks_per_refresh(Duration::from_secs(30), Duration::from_secs(10)),
-            1,
-        );
-        // Zero tick period: defensive default.
-        assert_eq!(
-            compute_ticks_per_refresh(Duration::from_secs(0), Duration::from_secs(10)),
-            1,
-        );
     }
 }
