@@ -393,11 +393,15 @@ impl SeedManager {
         // first drops its mpsc::Sender so any in-flight try_send stays safe.
         self.bandwidth.set_merger_poke(None);
 
-        if let Some(tx) = self.merger_shutdown.take() {
-            let _ = tx.send(());
+        if let Some(tx) = self.merger_shutdown.take()
+            && tx.send(()).is_err()
+        {
+            debug!(target: "joal_core::seed_manager", "merger shutdown receiver already dropped");
         }
-        if let Some(handle) = self.merger.take() {
-            let _ = handle.await;
+        if let Some(handle) = self.merger.take()
+            && let Err(error) = handle.await
+        {
+            debug!(target: "joal_core::seed_manager", %error, "merger task ended during stop");
         }
         self.events.publish(EngineEvent::GlobalSeedStopped);
         info!(target: "joal_core::seed_manager", "seed manager stopped");

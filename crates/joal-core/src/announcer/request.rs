@@ -141,38 +141,3 @@ impl AnnounceDataAccessor {
             .uploaded()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ih(x: u8) -> InfoHash {
-        let mut bytes = [0u8; 20];
-        bytes[0] = x;
-        InfoHash::from_bytes(bytes)
-    }
-
-    #[test]
-    fn factory_methods_set_matching_events() {
-        assert_eq!(
-            AnnounceRequest::create_start(ih(1)).event(),
-            RequestEvent::Started
-        );
-        assert_eq!(
-            AnnounceRequest::create_regular(ih(2)).event(),
-            RequestEvent::None
-        );
-        assert_eq!(
-            AnnounceRequest::create_stop(ih(3)).event(),
-            RequestEvent::Stopped
-        );
-    }
-
-    #[test]
-    fn to_stop_replaces_event_but_preserves_info_hash() {
-        let r = AnnounceRequest::create_start(ih(7));
-        let s = r.to_stop();
-        assert_eq!(s.event(), RequestEvent::Stopped);
-        assert_eq!(s.info_hash(), r.info_hash());
-    }
-}

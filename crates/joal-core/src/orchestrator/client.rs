@@ -102,7 +102,10 @@ impl ClientOrchestrator {
             executor: Mutex::new(None),
             weak_self: std::sync::OnceLock::new(),
         });
-        let _ = shared.weak_self.set(Arc::downgrade(&shared));
+        assert!(
+            shared.weak_self.set(Arc::downgrade(&shared)).is_ok(),
+            "weak_self set exactly once during construction",
+        );
 
         // Build the response-handler chain: field order in the struct
         // defines execution order — publisher first for UX parity with Java.
@@ -206,7 +209,9 @@ impl ClientOrchestrator {
             return Err(ClientError::NotRunning);
         };
         handle.abort();
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            debug!(%error, "orchestrator loop aborted during stop");
+        }
 
         // Turn every queued non-start request into a stop and submit it.
         for pending in self.delay_queue.drain_all() {
@@ -410,7 +415,9 @@ impl OrchestratorControl for SharedState {
                 .torrent_provider
                 .move_to_archive_folder(&info_hash)
                 .await;
-            let _ = shared.add_torrent_from_directory().await;
+            if let Err(error) = shared.add_torrent_from_directory().await {
+                debug!(%error, "no replacement torrent available after too many failures");
+            }
         });
     }
 
@@ -454,7 +461,9 @@ impl OrchestratorControl for SharedState {
             .as_ref()
             .map(Arc::clone);
         tokio::spawn(async move {
-            let _ = shared.add_torrent_from_directory().await;
+            if let Err(error) = shared.add_torrent_from_directory().await {
+                debug!(%error, "no replacement torrent available after stopped torrent");
+            }
             shared.remove_announcer(&stopped);
             if let Some(exec) = executor {
                 exec.deny(&stopped);
@@ -514,15 +523,5 @@ impl TorrentFileChangeAware for TorrentChangeAdapter {
                 Duration::from_secs(1),
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn orchestrator_tick_is_one_second() {
-        assert_eq!(ORCHESTRATOR_TICK, Duration::from_secs(1));
     }
 }

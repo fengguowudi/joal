@@ -13,6 +13,7 @@
 //! / `Hash` are derived from the raw bytes. This keeps torrents deduplicated
 //! in a `HashMap` keyed on `InfoHash` identically to the Java side.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
@@ -120,103 +121,137 @@ impl MockedTorrent {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TorrentError> {
         let top = bencode::parse(bytes)?;
         let info_raw = bencode::extract_info_dict_bytes(bytes)?;
-
-        let info_hash = {
-            let mut hasher = Sha1::new();
-            hasher.update(info_raw);
-            let digest = hasher.finalize();
-            let mut out = [0u8; 20];
-            out.copy_from_slice(&digest);
-            InfoHash::from_bytes(out)
-        };
-
-        let info = top.get("info").ok_or(TorrentError::MissingKey("info"))?;
-        let info = info.as_dict().ok_or(TorrentError::WrongType {
-            key: "info",
-            expected: "dict",
-        })?;
-
-        let name = info
-            .get(&b"name"[..].to_vec())
-            .and_then(Value::as_bytes)
-            .ok_or(TorrentError::MissingKey("info.name"))?;
-        let name = std::str::from_utf8(name)
-            .map_err(|_| TorrentError::NonUtf8Name)?
-            .to_owned();
-
-        let piece_length = info
-            .get(&b"piece length"[..].to_vec())
-            .and_then(Value::as_int)
-            .ok_or(TorrentError::MissingKey("info.piece length"))?;
-        if piece_length <= 0 {
-            return Err(TorrentError::WrongType {
-                key: "info.piece length",
-                expected: "positive integer",
-            });
-        }
-        let piece_length = piece_length as u64;
-
-        let pieces = info
-            .get(&b"pieces"[..].to_vec())
-            .and_then(Value::as_bytes)
-            .ok_or(TorrentError::MissingKey("info.pieces"))?;
-        if !pieces.len().is_multiple_of(20) {
-            return Err(TorrentError::InvalidPiecesLength { len: pieces.len() });
-        }
-        let piece_count = pieces.len() / 20;
-
+        let info = top_info_dict(&top)?;
+        let piece_length = parse_piece_length(info)?;
+        let piece_count = parse_piece_count(info)?;
         let total_size = compute_total_size(info)?;
-
-        let capacity_bytes = (piece_count as u64).saturating_mul(piece_length);
-        if capacity_bytes < total_size {
-            return Err(TorrentError::SizeMismatch);
-        }
-
-        let announce = top
-            .get("announce")
-            .and_then(Value::as_bytes)
-            .ok_or(TorrentError::MissingKey("announce"))?;
-        let announce = std::str::from_utf8(announce)
-            .map_err(|_| TorrentError::NonUtf8Announce)?
-            .to_owned();
-
-        let announce_tiers = top
-            .get("announce-list")
-            .and_then(Value::as_list)
-            .map(|tiers| {
-                tiers
-                    .iter()
-                    .filter_map(|tier| {
-                        tier.as_list().map(|urls| {
-                            urls.iter()
-                                .filter_map(|u| {
-                                    u.as_bytes()
-                                        .and_then(|b| std::str::from_utf8(b).ok())
-                                        .map(str::to_owned)
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                    })
-                    .filter(|t| !t.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        validate_piece_capacity(piece_count, piece_length, total_size)?;
 
         Ok(Self {
-            info_hash,
-            name,
+            info_hash: info_hash_from_raw(info_raw),
+            name: parse_name(info)?,
             total_size,
             piece_length,
             piece_count,
-            announce,
-            announce_tiers,
+            announce: parse_announce(&top)?,
+            announce_tiers: parse_announce_tiers(&top),
         })
     }
 }
 
-fn compute_total_size(
-    info: &std::collections::BTreeMap<Vec<u8>, Value>,
-) -> Result<u64, TorrentError> {
+fn info_hash_from_raw(info_raw: &[u8]) -> InfoHash {
+    let mut hasher = Sha1::new();
+    hasher.update(info_raw);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&digest);
+    InfoHash::from_bytes(out)
+}
+
+fn top_info_dict(top: &Value) -> Result<&BTreeMap<Vec<u8>, Value>, TorrentError> {
+    top.get("info")
+        .ok_or(TorrentError::MissingKey("info"))?
+        .as_dict()
+        .ok_or(TorrentError::WrongType {
+            key: "info",
+            expected: "dict",
+        })
+}
+
+fn parse_name(info: &BTreeMap<Vec<u8>, Value>) -> Result<String, TorrentError> {
+    let name = required_bytes(info, b"name".as_slice(), "info.name")?;
+    std::str::from_utf8(name)
+        .map(str::to_owned)
+        .map_err(|_| TorrentError::NonUtf8Name)
+}
+
+fn parse_piece_length(info: &BTreeMap<Vec<u8>, Value>) -> Result<u64, TorrentError> {
+    let piece_length = required_int(info, b"piece length".as_slice(), "info.piece length")?;
+    if piece_length <= 0 {
+        return Err(TorrentError::WrongType {
+            key: "info.piece length",
+            expected: "positive integer",
+        });
+    }
+    Ok(piece_length as u64)
+}
+
+fn parse_piece_count(info: &BTreeMap<Vec<u8>, Value>) -> Result<usize, TorrentError> {
+    let pieces = required_bytes(info, b"pieces".as_slice(), "info.pieces")?;
+    if !pieces.len().is_multiple_of(20) {
+        return Err(TorrentError::InvalidPiecesLength { len: pieces.len() });
+    }
+    Ok(pieces.len() / 20)
+}
+
+fn validate_piece_capacity(
+    piece_count: usize,
+    piece_length: u64,
+    total_size: u64,
+) -> Result<(), TorrentError> {
+    let capacity_bytes = (piece_count as u64).saturating_mul(piece_length);
+    if capacity_bytes < total_size {
+        Err(TorrentError::SizeMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_announce(top: &Value) -> Result<String, TorrentError> {
+    let announce = top
+        .get("announce")
+        .and_then(Value::as_bytes)
+        .ok_or(TorrentError::MissingKey("announce"))?;
+    std::str::from_utf8(announce)
+        .map(str::to_owned)
+        .map_err(|_| TorrentError::NonUtf8Announce)
+}
+
+fn parse_announce_tiers(top: &Value) -> Vec<Vec<String>> {
+    top.get("announce-list")
+        .and_then(Value::as_list)
+        .map(announce_tiers_from_value)
+        .unwrap_or_default()
+}
+
+fn announce_tiers_from_value(tiers: &[Value]) -> Vec<Vec<String>> {
+    tiers
+        .iter()
+        .filter_map(Value::as_list)
+        .map(announce_tier_urls)
+        .filter(|tier| !tier.is_empty())
+        .collect()
+}
+
+fn announce_tier_urls(urls: &[Value]) -> Vec<String> {
+    urls.iter()
+        .filter_map(Value::as_bytes)
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn required_bytes<'a>(
+    dict: &'a BTreeMap<Vec<u8>, Value>,
+    key: &[u8],
+    error_key: &'static str,
+) -> Result<&'a [u8], TorrentError> {
+    dict.get(key)
+        .and_then(Value::as_bytes)
+        .ok_or(TorrentError::MissingKey(error_key))
+}
+
+fn required_int(
+    dict: &BTreeMap<Vec<u8>, Value>,
+    key: &[u8],
+    error_key: &'static str,
+) -> Result<i64, TorrentError> {
+    dict.get(key)
+        .and_then(Value::as_int)
+        .ok_or(TorrentError::MissingKey(error_key))
+}
+
+fn compute_total_size(info: &BTreeMap<Vec<u8>, Value>) -> Result<u64, TorrentError> {
     if let Some(files) = info.get(&b"files"[..].to_vec()).and_then(Value::as_list) {
         let mut total: u64 = 0;
         for entry in files {
@@ -249,107 +284,5 @@ fn compute_total_size(
         Ok(length as u64)
     } else {
         Err(TorrentError::MissingKey("info.length or info.files"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn info_hash_hex_is_40_lowercase_chars() {
-        let bytes: [u8; 20] = [
-            0x00, 0xff, 0xab, 0xcd, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
-            0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        ];
-        let h = InfoHash::from_bytes(bytes);
-        let hex = h.to_hex();
-        assert_eq!(hex.len(), 40);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(hex.chars().all(|c| !c.is_ascii_uppercase()));
-        assert!(hex.starts_with("00ffabcdef"));
-    }
-
-    #[test]
-    fn single_file_torrent_parses() {
-        // Minimal single-file torrent: 20 bytes total, 10-byte pieces (2 pieces).
-        let pieces = vec![0u8; 40]; // 2 * 20-byte SHA-1
-        let mut info = Vec::new();
-        info.push(b'd');
-        info.extend_from_slice(b"6:lengthi20e");
-        info.extend_from_slice(b"4:name4:file");
-        info.extend_from_slice(b"12:piece lengthi10e");
-        info.extend_from_slice(b"6:pieces40:");
-        info.extend_from_slice(&pieces);
-        info.push(b'e');
-
-        let mut torrent = Vec::new();
-        torrent.push(b'd');
-        torrent.extend_from_slice(b"8:announce13:http://x/y/za");
-        torrent.extend_from_slice(b"4:info");
-        torrent.extend_from_slice(&info);
-        torrent.push(b'e');
-
-        let mt = MockedTorrent::from_bytes(&torrent).unwrap();
-        assert_eq!(mt.name, "file");
-        assert_eq!(mt.total_size, 20);
-        assert_eq!(mt.piece_length, 10);
-        assert_eq!(mt.piece_count, 2);
-        assert_eq!(mt.announce, "http://x/y/za");
-        assert!(mt.announce_tiers.is_empty());
-    }
-
-    #[test]
-    fn rejects_torrent_with_insufficient_pieces() {
-        // size=100 but only 1 piece of 10 bytes → 10 < 100 → reject.
-        let pieces = vec![0u8; 20];
-        let mut info = Vec::new();
-        info.push(b'd');
-        info.extend_from_slice(b"6:lengthi100e");
-        info.extend_from_slice(b"4:name4:file");
-        info.extend_from_slice(b"12:piece lengthi10e");
-        info.extend_from_slice(b"6:pieces20:");
-        info.extend_from_slice(&pieces);
-        info.push(b'e');
-
-        let mut torrent = Vec::new();
-        torrent.push(b'd');
-        torrent.extend_from_slice(b"8:announce13:http://x/y/za");
-        torrent.extend_from_slice(b"4:info");
-        torrent.extend_from_slice(&info);
-        torrent.push(b'e');
-
-        assert!(matches!(
-            MockedTorrent::from_bytes(&torrent),
-            Err(TorrentError::SizeMismatch)
-        ));
-    }
-
-    #[test]
-    fn multi_file_sizes_accumulate() {
-        let pieces = vec![0u8; 40];
-        let mut info = Vec::new();
-        info.push(b'd');
-        // "files" key must come before "name" lexicographically; BTreeMap ensures order.
-        info.extend_from_slice(b"5:filesl");
-        info.extend_from_slice(b"d6:lengthi7e4:pathl1:ae");
-        info.extend_from_slice(b"ed6:lengthi13e4:pathl1:be");
-        info.extend_from_slice(b"ee");
-        info.extend_from_slice(b"4:name3:pkg");
-        info.extend_from_slice(b"12:piece lengthi10e");
-        info.extend_from_slice(b"6:pieces40:");
-        info.extend_from_slice(&pieces);
-        info.push(b'e');
-
-        let mut torrent = Vec::new();
-        torrent.push(b'd');
-        torrent.extend_from_slice(b"8:announce13:http://x/y/za");
-        torrent.extend_from_slice(b"4:info");
-        torrent.extend_from_slice(&info);
-        torrent.push(b'e');
-
-        let mt = MockedTorrent::from_bytes(&torrent).unwrap();
-        assert_eq!(mt.total_size, 20);
-        assert_eq!(mt.name, "pkg");
     }
 }

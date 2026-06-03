@@ -42,7 +42,6 @@ fn preprocess_pattern(pattern: &str) -> Result<String, ClientError> {
         if code <= 0x7F {
             out.push(ch);
         } else if code <= 0xFF {
-            // `write!` into a `String` cannot fail.
             let _ = write!(out, "\\x{code:02x}");
         } else {
             return Err(ClientError::InvalidRegex(format!(
@@ -73,8 +72,6 @@ pub(super) struct TimedState {
 pub(super) struct AccessAwareEntry {
     value: Vec<u8>,
     last_access: Instant,
-    #[cfg(test)]
-    force_stale: bool,
 }
 
 impl AccessAwareEntry {
@@ -82,30 +79,15 @@ impl AccessAwareEntry {
         Self {
             value,
             last_access: Instant::now(),
-            #[cfg(test)]
-            force_stale: false,
         }
     }
 
     pub fn get(&mut self) -> &[u8] {
         self.last_access = Instant::now();
-        #[cfg(test)]
-        {
-            self.force_stale = false;
-        }
         &self.value
     }
 
     pub fn should_evict(&self, now: Instant) -> bool {
-        #[cfg(test)]
-        if self.force_stale {
-            return true;
-        }
         now.duration_since(self.last_access) >= TORRENT_PERSISTENT_TTL
-    }
-
-    #[cfg(test)]
-    pub fn mark_stale_for_test(&mut self) {
-        self.force_stale = true;
     }
 }

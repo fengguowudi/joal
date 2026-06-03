@@ -80,17 +80,6 @@ pub fn top_bar_status(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_runni
     );
 }
 
-/// Standalone top-bar wrapper that takes care of the `horizontal()` layout —
-/// used by the benchmark harness which doesn't share the row with anything
-/// else. Production UI calls `top_bar_status` directly inside its own
-/// horizontal row so it can pack action buttons alongside.
-#[cfg(test)]
-pub fn top_bar(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
-    ui.horizontal(|ui| {
-        top_bar_status(ui, snapshot, engine_running, t);
-    });
-}
-
 pub fn bottom_bar(
     ui: &mut egui::Ui,
     snapshot: &EngineSnapshot,
@@ -122,10 +111,6 @@ pub fn bottom_bar(
             theme::Tone::Neutral,
         );
 
-        // Right-anchored footer telemetry: mirrors the top bar's "▲" speed and
-        // torrent-count metrics so the bottom strip is balanced and the user
-        // can read the same headline numbers at a glance from either edge of
-        // the workspace. Push to the right edge using a right-to-left layout.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Active client filename — light gray, low emphasis, sits at the
             // far right corner like a "powered by" tag.

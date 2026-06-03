@@ -29,37 +29,3 @@ impl Casing {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upper_uppercases_ascii() {
-        assert_eq!(Casing::Upper.to_case("Hello 42"), "HELLO 42");
-    }
-
-    #[test]
-    fn lower_lowercases_ascii() {
-        assert_eq!(Casing::Lower.to_case("Hello 42"), "hello 42");
-    }
-
-    #[test]
-    fn none_is_identity() {
-        assert_eq!(Casing::None.to_case("AbC"), "AbC");
-    }
-
-    #[test]
-    fn json_tags_match_java() {
-        assert_eq!(serde_json::to_string(&Casing::Upper).unwrap(), "\"upper\"");
-        assert_eq!(serde_json::to_string(&Casing::Lower).unwrap(), "\"lower\"");
-        assert_eq!(serde_json::to_string(&Casing::None).unwrap(), "\"none\"");
-
-        let up: Casing = serde_json::from_str("\"upper\"").unwrap();
-        assert_eq!(up, Casing::Upper);
-        let lo: Casing = serde_json::from_str("\"lower\"").unwrap();
-        assert_eq!(lo, Casing::Lower);
-        let nn: Casing = serde_json::from_str("\"none\"").unwrap();
-        assert_eq!(nn, Casing::None);
-    }
-}

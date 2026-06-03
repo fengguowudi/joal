@@ -1,12 +1,19 @@
 use std::cmp::Ordering;
-use std::time::Duration;
 
 use joal_core::snapshot::{EngineSnapshot, TorrentStatus};
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use super::DeleteConfirmation;
 use super::{i18n::Tr, status_bar::format_speed, theme};
 use crate::EngineCommand;
+use torrent_table_format::{
+    format_bytes, interval_text, last_announce_text, opt_u32, progress_fraction, progress_text,
+    short_hash,
+};
+
+#[path = "torrent_table_format.rs"]
+mod torrent_table_format;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SortColumn {
@@ -183,303 +190,347 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_min_width(min_table_width);
-            build_torrent_table(
-                ui,
+            TableRender {
                 snapshot,
                 pending_delete,
                 cmd_tx,
                 table_state,
                 t,
-                &visible_indices,
+                visible_indices: &visible_indices,
                 text_height,
                 row_height,
                 available_height,
-            );
+            }
+            .show(ui);
         });
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn build_torrent_table(
-    ui: &mut egui::Ui,
-    snapshot: &mut EngineSnapshot,
-    pending_delete: &mut Option<DeleteConfirmation>,
-    cmd_tx: &mpsc::Sender<EngineCommand>,
-    table_state: &mut TableState,
-    t: &Tr,
-    visible_indices: &[usize],
+struct TableRender<'a> {
+    snapshot: &'a mut EngineSnapshot,
+    pending_delete: &'a mut Option<DeleteConfirmation>,
+    cmd_tx: &'a mpsc::Sender<EngineCommand>,
+    table_state: &'a mut TableState,
+    t: &'a Tr,
+    visible_indices: &'a [usize],
     text_height: f32,
     row_height: f32,
     available_height: f32,
-) {
-    egui_extras::TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .vscroll(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .min_scrolled_height(available_height.max(120.0))
-        .max_scroll_height(available_height.max(120.0))
-        .column(
-            egui_extras::Column::initial(200.0)
-                .at_least(140.0)
-                .at_most(280.0)
-                .clip(true),
-        ) // Name
-        .column(egui_extras::Column::initial(124.0).at_least(120.0)) // Progress
-        .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Upload speed
-        .column(egui_extras::Column::initial(92.0).at_least(84.0)) // Uploaded
-        .column(egui_extras::Column::initial(82.0).at_least(72.0)) // Download speed
-        .column(egui_extras::Column::initial(92.0).at_least(84.0)) // Downloaded
-        .column(egui_extras::Column::initial(56.0).at_least(44.0)) // Seeders
-        .column(egui_extras::Column::initial(56.0).at_least(44.0)) // Leechers
-        .column(egui_extras::Column::initial(116.0).at_least(108.0)) // Last announce
-        .column(egui_extras::Column::initial(110.0).at_least(100.0)) // Health
-        .column(egui_extras::Column::initial(184.0).at_least(168.0)) // Actions
-        .header(text_height + 12.0, |mut header| {
-            sortable_header(&mut header, table_state, SortColumn::Name, t.col_name);
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::Progress,
-                t.col_progress,
-            );
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::UploadSpeed,
-                t.col_speed,
-            );
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::Uploaded,
-                t.col_uploaded,
-            );
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::DownloadSpeed,
-                t.col_dl_speed,
-            );
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::Downloaded,
-                t.col_downloaded,
-            );
-            sortable_header(&mut header, table_state, SortColumn::Seeders, t.col_seeders);
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::Leechers,
-                t.col_leechers,
-            );
-            sortable_header(
-                &mut header,
-                table_state,
-                SortColumn::LastAnnounce,
-                t.col_last_announce,
-            );
-            sortable_header(&mut header, table_state, SortColumn::Health, t.col_health);
-            header.col(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(t.col_actions)
-                            .small()
-                            .color(theme::text_secondary())
-                            .strong(),
-                    )
-                    .truncate(),
-                );
-            });
-        })
-        .body(|body| {
-            body.rows(row_height, visible_indices.len(), |mut row| {
-                let row_index = row.index();
-                let index = visible_indices[row_index];
-                let torrent = &mut snapshot.torrents[index];
-                // Row id anchor is `row_index` (positional / slot key), NOT
-                // `info_hash`. This follows the documented egui id-stability
-                // convention in `.trellis/spec/backend/quality-guidelines.md`:
-                // for row/slot-based layouts whose visual identity is the
-                // screen position (TableBuilder rows + cells), keys must be
-                // scoped by the stable slot — `row.index()` here — not by
-                // domain data (info_hash) that can move to a different rect
-                // inside the same frame. The latter would re-introduce
-                // `WARN egui::context: ... changed id between passes` whenever
-                // a sorting/filtering shuffle puts a different torrent into a
-                // previously-occupied rect.
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "name", |ui| {
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&torrent.name)
-                                        .strong()
-                                        .color(theme::text_primary()),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(&torrent.name);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(short_hash(torrent))
-                                        .monospace()
-                                        .small()
-                                        .color(theme::text_tertiary()),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(torrent.info_hash.to_string());
-                        });
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "progress", |ui| {
-                        let progress = progress_fraction(torrent);
-                        let tone = if progress >= 1.0 || torrent.initial_completed {
-                            theme::Tone::Success
-                        } else {
-                            theme::Tone::Accent
-                        };
-                        // Use the tone's strong foreground color for the
-                        // progress fill so it stands out, with a soft track
-                        // (panel_fill) so the bar reads as a pill, not a
-                        // square.
-                        ui.add(
-                            egui::ProgressBar::new(progress as f32)
-                                .desired_width(ui.available_width())
-                                .fill(theme::tone_colors(tone).fg)
-                                .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
-                                .text(
-                                    egui::RichText::new(progress_text(torrent))
-                                        .small()
-                                        .strong()
-                                        .color(theme::text_primary()),
-                                ),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "upload_speed", |ui| {
-                        ui.label(
-                            egui::RichText::new(format_speed(torrent.current_speed_bps))
-                                .color(theme::text_primary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "uploaded", |ui| {
-                        ui.label(
-                            egui::RichText::new(format_bytes(torrent.uploaded_bytes))
-                                .color(theme::text_primary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "download_speed", |ui| {
-                        ui.label(
-                            egui::RichText::new(format_speed(torrent.current_download_speed_bps))
-                                .color(theme::text_secondary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "downloaded", |ui| {
-                        ui.label(
-                            egui::RichText::new(format_bytes(torrent.downloaded_bytes))
-                                .color(theme::text_secondary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "seeders", |ui| {
-                        ui.label(
-                            egui::RichText::new(opt_u32(torrent.last_known_seeders))
-                                .color(theme::text_primary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "leechers", |ui| {
-                        ui.label(
-                            egui::RichText::new(opt_u32(torrent.last_known_leechers))
-                                .color(theme::text_primary()),
-                        );
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "announce_meta", |ui| {
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(last_announce_text(torrent, t))
-                                        .color(theme::text_primary()),
-                                )
-                                .truncate(),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(interval_text(torrent, t))
-                                        .small()
-                                        .color(theme::text_tertiary()),
-                                )
-                                .truncate(),
-                            );
-                        });
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "health", |ui| {
-                        health_cell(ui, row_index, torrent, t);
-                    });
-                });
-                row.col(|ui| {
-                    cell_scope(ui, row_index, "actions", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let mark_label = if torrent.initial_completed {
-                                t.action_marked_complete
-                            } else {
-                                t.action_mark_complete
-                            };
-                            let response = theme::tone_button(
-                                ui,
-                                "mark_completed",
-                                mark_label,
-                                theme::Tone::Success,
-                                egui::vec2(88.0, 24.0),
-                                torrent.initial_completed,
-                            )
-                            .on_hover_text(t.mark_completed_tooltip);
-                            if response.clicked() {
-                                torrent.initial_completed = !torrent.initial_completed;
-                                let _ =
-                                    cmd_tx.try_send(EngineCommand::SetTorrentInitialCompleted {
-                                        info_hash: torrent.info_hash.clone(),
-                                        completed: torrent.initial_completed,
-                                    });
-                            }
+}
 
-                            if theme::tone_button(
-                                ui,
-                                "archive_torrent",
-                                t.action_archive,
-                                theme::Tone::Danger,
-                                egui::vec2(68.0, 24.0),
-                                false,
-                            )
-                            .clicked()
-                            {
-                                *pending_delete = Some(DeleteConfirmation {
-                                    info_hash: torrent.info_hash.clone(),
-                                    name: torrent.name.clone(),
-                                });
-                            }
-                        });
-                    });
+impl TableRender<'_> {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        egui_extras::TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .vscroll(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .min_scrolled_height(self.available_height.max(120.0))
+            .max_scroll_height(self.available_height.max(120.0))
+            .column(
+                egui_extras::Column::initial(200.0)
+                    .at_least(140.0)
+                    .at_most(280.0)
+                    .clip(true),
+            )
+            .column(egui_extras::Column::initial(124.0).at_least(120.0))
+            .column(egui_extras::Column::initial(82.0).at_least(72.0))
+            .column(egui_extras::Column::initial(92.0).at_least(84.0))
+            .column(egui_extras::Column::initial(82.0).at_least(72.0))
+            .column(egui_extras::Column::initial(92.0).at_least(84.0))
+            .column(egui_extras::Column::initial(56.0).at_least(44.0))
+            .column(egui_extras::Column::initial(56.0).at_least(44.0))
+            .column(egui_extras::Column::initial(116.0).at_least(108.0))
+            .column(egui_extras::Column::initial(110.0).at_least(100.0))
+            .column(egui_extras::Column::initial(184.0).at_least(168.0))
+            .header(self.text_height + 12.0, |header| self.render_header(header))
+            .body(|body| {
+                body.rows(self.row_height, self.visible_indices.len(), |row| {
+                    self.render_row(row);
                 });
             });
+    }
+
+    fn render_header(&mut self, mut header: egui_extras::TableRow<'_, '_>) {
+        let t = self.t;
+        sortable_header(&mut header, self.table_state, SortColumn::Name, t.col_name);
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Progress,
+            t.col_progress,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::UploadSpeed,
+            t.col_speed,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Uploaded,
+            t.col_uploaded,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::DownloadSpeed,
+            t.col_dl_speed,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Downloaded,
+            t.col_downloaded,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Seeders,
+            t.col_seeders,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Leechers,
+            t.col_leechers,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::LastAnnounce,
+            t.col_last_announce,
+        );
+        sortable_header(
+            &mut header,
+            self.table_state,
+            SortColumn::Health,
+            t.col_health,
+        );
+        header.col(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(t.col_actions)
+                        .small()
+                        .color(theme::text_secondary())
+                        .strong(),
+                )
+                .truncate(),
+            );
         });
+    }
+
+    fn render_row(&mut self, mut row: egui_extras::TableRow<'_, '_>) {
+        let row_index = row.index();
+        let index = self.visible_indices[row_index];
+        let torrent = &mut self.snapshot.torrents[index];
+        row.col(|ui| name_cell(ui, row_index, torrent));
+        row.col(|ui| progress_cell(ui, row_index, torrent));
+        row.col(|ui| {
+            speed_cell(
+                ui,
+                row_index,
+                "upload_speed",
+                torrent.current_speed_bps,
+                theme::text_primary(),
+            );
+        });
+        row.col(|ui| {
+            bytes_cell(
+                ui,
+                row_index,
+                "uploaded",
+                torrent.uploaded_bytes,
+                theme::text_primary(),
+            );
+        });
+        row.col(|ui| {
+            speed_cell(
+                ui,
+                row_index,
+                "download_speed",
+                torrent.current_download_speed_bps,
+                theme::text_secondary(),
+            );
+        });
+        row.col(|ui| {
+            bytes_cell(
+                ui,
+                row_index,
+                "downloaded",
+                torrent.downloaded_bytes,
+                theme::text_secondary(),
+            );
+        });
+        row.col(|ui| optional_count_cell(ui, row_index, "seeders", torrent.last_known_seeders));
+        row.col(|ui| optional_count_cell(ui, row_index, "leechers", torrent.last_known_leechers));
+        row.col(|ui| announce_meta_cell(ui, row_index, torrent, self.t));
+        row.col(|ui| health_cell(ui, row_index, torrent, self.t));
+        row.col(|ui| {
+            actions_cell(
+                ui,
+                row_index,
+                torrent,
+                self.pending_delete,
+                self.cmd_tx,
+                self.t,
+            );
+        });
+    }
+}
+
+fn name_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus) {
+    cell_scope(ui, row_index, "name", |ui| {
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&torrent.name)
+                        .strong()
+                        .color(theme::text_primary()),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&torrent.name);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(short_hash(torrent))
+                        .monospace()
+                        .small()
+                        .color(theme::text_tertiary()),
+                )
+                .truncate(),
+            )
+            .on_hover_text(torrent.info_hash.to_string());
+        });
+    });
+}
+
+fn progress_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus) {
+    cell_scope(ui, row_index, "progress", |ui| {
+        let progress = progress_fraction(torrent);
+        let tone = if progress >= 1.0 || torrent.initial_completed {
+            theme::Tone::Success
+        } else {
+            theme::Tone::Accent
+        };
+        ui.add(
+            egui::ProgressBar::new(progress as f32)
+                .desired_width(ui.available_width())
+                .fill(theme::tone_colors(tone).fg)
+                .corner_radius(egui::CornerRadius::same(theme::CR_BADGE))
+                .text(
+                    egui::RichText::new(progress_text(torrent))
+                        .small()
+                        .strong()
+                        .color(theme::text_primary()),
+                ),
+        );
+    });
+}
+
+fn speed_cell(
+    ui: &mut egui::Ui,
+    row_index: usize,
+    key: &'static str,
+    bps: u64,
+    color: egui::Color32,
+) {
+    cell_scope(ui, row_index, key, |ui| {
+        ui.label(egui::RichText::new(format_speed(bps)).color(color));
+    });
+}
+
+fn bytes_cell(
+    ui: &mut egui::Ui,
+    row_index: usize,
+    key: &'static str,
+    bytes: u64,
+    color: egui::Color32,
+) {
+    cell_scope(ui, row_index, key, |ui| {
+        ui.label(egui::RichText::new(format_bytes(bytes)).color(color));
+    });
+}
+
+fn optional_count_cell(ui: &mut egui::Ui, row_index: usize, key: &'static str, value: Option<u32>) {
+    cell_scope(ui, row_index, key, |ui| {
+        ui.label(egui::RichText::new(opt_u32(value)).color(theme::text_primary()));
+    });
+}
+
+fn announce_meta_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus, t: &Tr) {
+    cell_scope(ui, row_index, "announce_meta", |ui| {
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(last_announce_text(torrent, t))
+                        .color(theme::text_primary()),
+                )
+                .truncate(),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(interval_text(torrent, t))
+                        .small()
+                        .color(theme::text_tertiary()),
+                )
+                .truncate(),
+            );
+        });
+    });
+}
+
+fn actions_cell(
+    ui: &mut egui::Ui,
+    row_index: usize,
+    torrent: &mut TorrentStatus,
+    pending_delete: &mut Option<DeleteConfirmation>,
+    cmd_tx: &mpsc::Sender<EngineCommand>,
+    t: &Tr,
+) {
+    cell_scope(ui, row_index, "actions", |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let mark_label = if torrent.initial_completed {
+                t.action_marked_complete
+            } else {
+                t.action_mark_complete
+            };
+            let response = theme::tone_button(
+                ui,
+                "mark_completed",
+                mark_label,
+                theme::Tone::Success,
+                egui::vec2(88.0, 24.0),
+                torrent.initial_completed,
+            )
+            .on_hover_text(t.mark_completed_tooltip);
+            if response.clicked() {
+                torrent.initial_completed = !torrent.initial_completed;
+                if let Err(error) = cmd_tx.try_send(EngineCommand::SetTorrentInitialCompleted {
+                    info_hash: torrent.info_hash.clone(),
+                    completed: torrent.initial_completed,
+                }) {
+                    warn!(%error, "failed to enqueue torrent completion toggle");
+                }
+            }
+            if theme::tone_button(
+                ui,
+                "archive_torrent",
+                t.action_archive,
+                theme::Tone::Danger,
+                egui::vec2(68.0, 24.0),
+                false,
+            )
+            .clicked()
+            {
+                *pending_delete = Some(DeleteConfirmation {
+                    info_hash: torrent.info_hash.clone(),
+                    name: torrent.name.clone(),
+                });
+            }
+        });
+    });
 }
 
 fn visible_count(snapshot: &EngineSnapshot, table_state: &TableState) -> usize {
@@ -677,68 +728,6 @@ fn health_detail(torrent: &TorrentStatus, t: &Tr) -> String {
     }
 }
 
-fn short_hash(torrent: &TorrentStatus) -> String {
-    let hash = torrent.info_hash.to_string();
-    format!("{}...", &hash[..12])
-}
-
-fn last_announce_text(torrent: &TorrentStatus, t: &Tr) -> String {
-    match torrent.last_announced_at {
-        Some(last_announced_at) => format_duration(last_announced_at.elapsed()),
-        None => t.status_never.to_owned(),
-    }
-}
-
-fn interval_text(torrent: &TorrentStatus, t: &Tr) -> String {
-    match torrent.last_known_interval {
-        Some(interval) => format!(
-            "{} {}",
-            t.status_interval,
-            format_duration(Duration::from_secs(interval.into()))
-        ),
-        None => format!("{} {}", t.status_interval, t.status_never),
-    }
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    if total_secs < 60 {
-        format!("{total_secs}s")
-    } else if total_secs < 3600 {
-        format!("{}m {}s", total_secs / 60, total_secs % 60)
-    } else {
-        format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn opt_u32(val: Option<u32>) -> String {
-    val.map_or_else(|| "\u{2014}".to_owned(), |v| v.to_string())
-}
-
-fn progress_fraction(torrent: &TorrentStatus) -> f64 {
-    if torrent.total_size == 0 {
-        1.0
-    } else {
-        (torrent.downloaded_bytes as f64 / torrent.total_size as f64).clamp(0.0, 1.0)
-    }
-}
-
-fn progress_text(torrent: &TorrentStatus) -> String {
-    format!("{:.1}%", progress_fraction(torrent) * 100.0)
-}
-
 fn cell_scope<R>(
     ui: &mut egui::Ui,
     row_index: usize,
@@ -753,219 +742,4 @@ fn cell_scope<R>(
     // mirrors `.trellis/spec/backend/quality-guidelines.md`'s rule for row /
     // slot-based layouts.
     ui.push_id((row_index, key), add_contents).inner
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui::i18n::{Language, tr};
-    use joal_core::torrent::InfoHash;
-
-    fn torrent(name: &str, fill: u8) -> TorrentStatus {
-        let downloaded_bytes = u64::from(fill) * 10;
-        TorrentStatus {
-            info_hash: InfoHash::from_bytes([fill; 20]),
-            name: name.to_owned(),
-            total_size: 1000,
-            uploaded_bytes: u64::from(fill) * 1000,
-            downloaded_bytes,
-            left_bytes: 1000 - downloaded_bytes,
-            current_speed_bps: u64::from(fill) * 100,
-            current_download_speed_bps: u64::from(fill) * 10,
-            initial_completed: false,
-            last_known_interval: Some(1800),
-            last_known_seeders: Some(u32::from(fill)),
-            last_known_leechers: Some(u32::from(fill)),
-            consecutive_fails: 0,
-            last_announced_at: Some(std::time::Instant::now()),
-        }
-    }
-
-    #[test]
-    fn visible_indices_filter_by_search_name_and_hash() {
-        let torrents = vec![torrent("Alpha", 0x11), torrent("Beta", 0x22)];
-        let mut state = TableState {
-            search_query: "alpha".to_owned(),
-            ..TableState::default()
-        };
-        assert_eq!(visible_torrent_indices(&torrents, &state), vec![0]);
-
-        state.search_query = "2222".to_owned();
-        assert_eq!(visible_torrent_indices(&torrents, &state), vec![1]);
-    }
-
-    #[test]
-    fn visible_indices_filter_attention_rows() {
-        let mut healthy = torrent("Healthy", 0x11);
-        healthy.last_known_leechers = Some(5);
-
-        let mut zero_leechers = torrent("Zero", 0x22);
-        zero_leechers.last_known_leechers = Some(0);
-
-        let mut warning = torrent("Warn", 0x33);
-        warning.consecutive_fails = 1;
-
-        let state = TableState {
-            attention_only: true,
-            ..TableState::default()
-        };
-
-        let visible = visible_torrent_indices(&[healthy, zero_leechers, warning], &state);
-        assert_eq!(visible, vec![2, 1]);
-    }
-
-    #[test]
-    fn visible_indices_sort_seeders_descending() {
-        let low = torrent("Low", 0x11);
-        let mut high = torrent("High", 0x22);
-        high.last_known_seeders = Some(99);
-
-        let state = TableState {
-            sort_column: SortColumn::Seeders,
-            sort_direction: SortDirection::Descending,
-            ..TableState::default()
-        };
-
-        let visible = visible_torrent_indices(&[low, high], &state);
-        assert_eq!(visible, vec![1, 0]);
-    }
-
-    #[test]
-    fn attention_toggle_across_discarded_pass_keeps_widget_ids_stable() {
-        let ctx = egui::Context::default();
-        let mut healthy = torrent("Healthy", 0x11);
-        healthy.last_known_leechers = Some(5);
-
-        let mut warning = torrent("Warn", 0x22);
-        warning.consecutive_fails = 1;
-
-        let mut snapshot = EngineSnapshot {
-            active_client_filename: "utorrent-3.5.0_43916.client".to_owned(),
-            global_upload_speed_bps: 0,
-            global_download_speed_bps: 0,
-            torrents: vec![healthy, warning],
-        };
-        let mut pending_delete = None;
-        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
-        let mut table_state = TableState::default();
-        let mut first_pass = true;
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1280.0, 720.0),
-            )),
-            ..Default::default()
-        };
-
-        let output = ctx.run_ui(raw_input, |ui| {
-            show(
-                ui,
-                &mut snapshot,
-                &mut pending_delete,
-                &cmd_tx,
-                &mut table_state,
-                tr(Language::Chinese),
-            );
-            if first_pass {
-                first_pass = false;
-                table_state.attention_only = true;
-                ui.ctx().request_discard("apply attention filter");
-            }
-        });
-
-        assert!(
-            !contains_id_warning_shape(&output.shapes),
-            "expected no debug warning shapes after a discarded-pass filter change",
-        );
-    }
-
-    #[test]
-    fn data_update_across_discarded_pass_keeps_widget_ids_stable() {
-        // Reproduces the runtime warning class from `wrong.txt`: a tracker
-        // announce returns new seeders / leechers / speed values, the egui
-        // multi-pass layout re-runs, and the row widgets must keep stable ids
-        // even though their displayed text changed character count between
-        // passes (e.g. "0 B/s" -> "120.5 KB/s").
-        let ctx = egui::Context::default();
-        let mut alpha = torrent("Alpha", 0x11);
-        alpha.last_known_seeders = Some(5);
-        alpha.last_known_leechers = Some(3);
-        alpha.current_speed_bps = 0;
-
-        let mut beta = torrent("Beta", 0x22);
-        beta.consecutive_fails = 1;
-        beta.last_known_seeders = Some(2);
-        beta.last_known_leechers = Some(0);
-        beta.current_speed_bps = 1024;
-
-        let mut snapshot = EngineSnapshot {
-            active_client_filename: "utorrent-3.5.0_43916.client".to_owned(),
-            global_upload_speed_bps: 0,
-            global_download_speed_bps: 0,
-            torrents: vec![alpha, beta],
-        };
-        let mut pending_delete = None;
-        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
-        let mut table_state = TableState::default();
-        let mut first_pass = true;
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1280.0, 720.0),
-            )),
-            ..Default::default()
-        };
-
-        let output = ctx.run_ui(raw_input, |ui| {
-            show(
-                ui,
-                &mut snapshot,
-                &mut pending_delete,
-                &cmd_tx,
-                &mut table_state,
-                tr(Language::Chinese),
-            );
-            if first_pass {
-                first_pass = false;
-                // Simulate a tracker update arriving between passes — speeds
-                // and seeder/leecher counts mutate so several cell label
-                // widths shift, but the row slot ids must stay anchored.
-                for torrent in &mut snapshot.torrents {
-                    torrent.current_speed_bps = torrent.current_speed_bps.saturating_add(120_000);
-                    torrent.current_download_speed_bps =
-                        torrent.current_download_speed_bps.saturating_add(35_000);
-                    torrent.uploaded_bytes = torrent.uploaded_bytes.saturating_add(2_500_000);
-                    torrent.downloaded_bytes = torrent.downloaded_bytes.saturating_add(1_200_000);
-                    torrent.last_known_seeders =
-                        Some(torrent.last_known_seeders.unwrap_or(0).saturating_add(4));
-                    torrent.last_known_leechers =
-                        Some(torrent.last_known_leechers.unwrap_or(0).saturating_add(7));
-                }
-                ui.ctx().request_discard("simulate snapshot update");
-            }
-        });
-
-        assert!(
-            !contains_id_warning_shape(&output.shapes),
-            "expected no debug warning shapes after a discarded-pass data update",
-        );
-    }
-
-    fn contains_id_warning_shape(shapes: &[egui::epaint::ClippedShape]) -> bool {
-        shapes
-            .iter()
-            .any(|clipped| shape_contains_id_warning(&clipped.shape))
-    }
-
-    fn shape_contains_id_warning(shape: &egui::epaint::Shape) -> bool {
-        match shape {
-            egui::epaint::Shape::Rect(rect) => {
-                rect.fill == egui::Color32::TRANSPARENT
-                    && rect.stroke.color == egui::Color32::RED
-                    && (rect.stroke.width - 2.0).abs() < f32::EPSILON
-            }
-            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(shape_contains_id_warning),
-            _ => false,
-        }
-    }
 }

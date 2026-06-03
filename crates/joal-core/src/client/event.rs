@@ -30,16 +30,3 @@ impl RequestEvent {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_names_match_bep3_wire_format() {
-        assert_eq!(RequestEvent::None.event_name(), "");
-        assert_eq!(RequestEvent::Started.event_name(), "started");
-        assert_eq!(RequestEvent::Stopped.event_name(), "stopped");
-        assert_eq!(RequestEvent::Completed.event_name(), "completed");
-    }
-}

@@ -178,74 +178,133 @@ impl<C: GenerateValue> RefreshPolicy<C> {
     pub fn get(&self, info_hash: &InfoHash, event: RequestEvent) -> Result<Vec<u8>, ClientError> {
         self.validate()?;
         match self {
-            Self::NEVER { config, state, .. } => {
-                let mut state = lock_state(state);
-                if state.value.is_none() {
-                    state.value = Some(config.generate()?);
-                    state.last_generation = Some(Instant::now());
-                }
-                Ok(state.value.clone().expect("value initialized"))
-            }
+            Self::NEVER { config, state, .. } => cached_value(config, state),
             Self::ALWAYS { config } => config.generate(),
             Self::TIMED {
                 refresh_every,
                 config,
                 state,
-            } => {
-                let mut state = lock_state(state);
-                let should_regenerate = state.last_generation.is_none_or(|last_generation| {
-                    last_generation.elapsed() >= Duration::from_secs(*refresh_every as u64)
-                });
-                if should_regenerate {
-                    state.last_generation = Some(Instant::now());
-                    state.value = Some(config.generate()?);
-                }
-                Ok(state.value.clone().expect("value initialized"))
-            }
+            } => timed_value(config, state, *refresh_every),
             Self::TIMED_OR_AFTER_STARTED_ANNOUNCE {
                 refresh_every,
                 config,
                 state,
-            } => {
-                let mut state = lock_state(state);
-                let should_regenerate = state.last_generation.is_none_or(|last_generation| {
-                    last_generation.elapsed() >= Duration::from_secs(*refresh_every as u64)
-                });
-                if should_regenerate {
-                    state.last_generation = Some(Instant::now());
-                    state.value = Some(config.generate()?);
-                }
-                let value = state.value.clone().expect("value initialized");
-                if event == RequestEvent::Started {
-                    state.value = Some(config.generate()?);
-                }
-                Ok(value)
-            }
+            } => timed_or_started_value(config, state, *refresh_every, event),
             Self::TORRENT_VOLATILE { config, state } => {
-                let mut state = lock_state(state);
-                if !state.contains_key(info_hash) {
-                    state.insert(info_hash.clone(), config.generate()?);
-                }
-                let value = state.get(info_hash).cloned().expect("value initialized");
-                if event == RequestEvent::Stopped {
-                    state.remove(info_hash);
-                }
-                Ok(value)
+                torrent_volatile_value(config, state, info_hash, event)
             }
             Self::TORRENT_PERSISTENT { config, state } => {
-                let mut state = lock_state(state);
-                if !state.contains_key(info_hash) {
-                    state.insert(info_hash.clone(), AccessAwareEntry::new(config.generate()?));
-                }
-                let value = state
-                    .get_mut(info_hash)
-                    .expect("value initialized")
-                    .get()
-                    .to_owned();
-                let now = Instant::now();
-                state.retain(|_, entry| !entry.should_evict(now));
-                Ok(value)
+                torrent_persistent_value(config, state, info_hash)
             }
         }
     }
+}
+
+fn cached_value<C: GenerateValue>(
+    config: &C,
+    state: &Arc<Mutex<TimedState>>,
+) -> Result<Vec<u8>, ClientError> {
+    let mut state = lock_state(state);
+    ensure_timed_value(config, &mut state)?;
+    initialized_value(&state)
+}
+
+fn timed_value<C: GenerateValue>(
+    config: &C,
+    state: &Arc<Mutex<TimedState>>,
+    refresh_every: i32,
+) -> Result<Vec<u8>, ClientError> {
+    let mut state = lock_state(state);
+    if timed_value_expired(&state, refresh_every) {
+        regenerate_timed_value(config, &mut state)?;
+    }
+    initialized_value(&state)
+}
+
+fn timed_or_started_value<C: GenerateValue>(
+    config: &C,
+    state: &Arc<Mutex<TimedState>>,
+    refresh_every: i32,
+    event: RequestEvent,
+) -> Result<Vec<u8>, ClientError> {
+    let mut state = lock_state(state);
+    if timed_value_expired(&state, refresh_every) {
+        regenerate_timed_value(config, &mut state)?;
+    }
+    let value = initialized_value(&state)?;
+    if event == RequestEvent::Started {
+        regenerate_timed_value(config, &mut state)?;
+    }
+    Ok(value)
+}
+
+fn torrent_volatile_value<C: GenerateValue>(
+    config: &C,
+    state: &Arc<Mutex<HashMap<InfoHash, Vec<u8>>>>,
+    info_hash: &InfoHash,
+    event: RequestEvent,
+) -> Result<Vec<u8>, ClientError> {
+    let mut state = lock_state(state);
+    let value = if let Some(value) = state.get(info_hash) {
+        value.clone()
+    } else {
+        let value = config.generate()?;
+        state.insert(info_hash.clone(), value.clone());
+        value
+    };
+    if event == RequestEvent::Stopped {
+        state.remove(info_hash);
+    }
+    Ok(value)
+}
+
+fn torrent_persistent_value<C: GenerateValue>(
+    config: &C,
+    state: &Arc<Mutex<HashMap<InfoHash, AccessAwareEntry>>>,
+    info_hash: &InfoHash,
+) -> Result<Vec<u8>, ClientError> {
+    let mut state = lock_state(state);
+    if !state.contains_key(info_hash) {
+        state.insert(info_hash.clone(), AccessAwareEntry::new(config.generate()?));
+    }
+    let value = state
+        .get_mut(info_hash)
+        .ok_or_else(|| ClientError::Integrity("missing persistent torrent value".to_owned()))?
+        .get()
+        .to_owned();
+    let now = Instant::now();
+    state.retain(|_, entry| !entry.should_evict(now));
+    Ok(value)
+}
+
+fn ensure_timed_value<C: GenerateValue>(
+    config: &C,
+    state: &mut TimedState,
+) -> Result<(), ClientError> {
+    if state.value.is_none() {
+        regenerate_timed_value(config, state)?;
+    }
+    Ok(())
+}
+
+fn regenerate_timed_value<C: GenerateValue>(
+    config: &C,
+    state: &mut TimedState,
+) -> Result<(), ClientError> {
+    state.value = Some(config.generate()?);
+    state.last_generation = Some(Instant::now());
+    Ok(())
+}
+
+fn timed_value_expired(state: &TimedState, refresh_every: i32) -> bool {
+    state.last_generation.is_none_or(|last_generation| {
+        last_generation.elapsed() >= Duration::from_secs(refresh_every as u64)
+    })
+}
+
+fn initialized_value(state: &TimedState) -> Result<Vec<u8>, ClientError> {
+    state
+        .value
+        .clone()
+        .ok_or_else(|| ClientError::Integrity("missing generated refresh-policy value".to_owned()))
 }

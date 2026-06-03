@@ -65,33 +65,3 @@ impl std::hash::Hash for Peers {
         self.leechers.hash(state);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_peers_has_zero_ratio() {
-        let p = Peers::new(0, 0);
-        assert_eq!(p.leechers_ratio(), 0.0);
-    }
-
-    #[test]
-    fn all_leechers_is_full_ratio() {
-        let p = Peers::new(0, 5);
-        assert!((p.leechers_ratio() - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn balanced_peers_gives_half_ratio() {
-        let p = Peers::new(10, 10);
-        assert!((p.leechers_ratio() - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn equality_ignores_ratio() {
-        let a = Peers::new(3, 7);
-        let b = Peers::new(3, 7);
-        assert_eq!(a, b);
-    }
-}

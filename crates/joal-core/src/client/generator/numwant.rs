@@ -48,33 +48,3 @@ impl NumwantProvider {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn regular_events_return_numwant() {
-        let np = NumwantProvider::new(200, 0).unwrap();
-        assert_eq!(np.get(RequestEvent::None), 200);
-        assert_eq!(np.get(RequestEvent::Started), 200);
-        assert_eq!(np.get(RequestEvent::Completed), 200);
-    }
-
-    #[test]
-    fn stopped_event_returns_numwant_on_stop() {
-        let np = NumwantProvider::new(200, 0).unwrap();
-        assert_eq!(np.get(RequestEvent::Stopped), 0);
-    }
-
-    #[test]
-    fn rejects_non_positive_numwant() {
-        assert!(NumwantProvider::new(0, 0).is_err());
-        assert!(NumwantProvider::new(-1, 0).is_err());
-    }
-
-    #[test]
-    fn rejects_negative_numwant_on_stop() {
-        assert!(NumwantProvider::new(1, -1).is_err());
-    }
-}

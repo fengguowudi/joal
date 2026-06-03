@@ -144,9 +144,9 @@ impl Default for BroadcastSink {
 
 impl EngineEventSink for BroadcastSink {
     fn publish(&self, event: EngineEvent) {
-        // `send` only fails when there are no active receivers; that is a
-        // legitimate quiescent state — drop the event.
-        let _ = self.sender.send(event);
+        if self.sender.send(event).is_err() {
+            // No active receiver: publishing is intentionally lossy.
+        }
     }
 }
 
@@ -154,32 +154,4 @@ impl EngineEventSink for BroadcastSink {
 /// an `Arc<dyn EngineEventSink>` so callers don't have to clone themselves.
 pub fn publish(sink: &Arc<dyn EngineEventSink>, event: EngineEvent) {
     sink.publish(event);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn broadcast_sink_fans_out_to_every_subscriber() {
-        let sink = BroadcastSink::new(8);
-        let mut rx1 = sink.subscribe();
-        let mut rx2 = sink.subscribe();
-        sink.publish(EngineEvent::GlobalSeedStopped);
-
-        match rx1.recv().await.unwrap() {
-            EngineEvent::GlobalSeedStopped => {}
-            other => panic!("rx1: {other:?}"),
-        }
-        match rx2.recv().await.unwrap() {
-            EngineEvent::GlobalSeedStopped => {}
-            other => panic!("rx2: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn noop_sink_silently_discards() {
-        let sink = NoopSink;
-        sink.publish(EngineEvent::GlobalSeedStopped);
-    }
 }

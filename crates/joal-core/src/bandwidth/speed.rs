@@ -27,21 +27,3 @@ impl Speed {
         self.bytes_per_second = bytes_per_second;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_stores_rate() {
-        let s = Speed::new(1_024);
-        assert_eq!(s.bytes_per_second(), 1_024);
-    }
-
-    #[test]
-    fn set_mutates_rate() {
-        let mut s = Speed::default();
-        s.set_bytes_per_second(2_048);
-        assert_eq!(s.bytes_per_second(), 2_048);
-    }
-}

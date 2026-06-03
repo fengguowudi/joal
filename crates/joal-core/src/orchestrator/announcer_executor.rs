@@ -151,7 +151,9 @@ impl AnnouncerExecutor {
         }
         let joined = async {
             for h in handles {
-                let _ = h.await;
+                if let Err(error) = h.await {
+                    debug!(%error, "announcer task ended before await_running_tasks completed");
+                }
             }
         };
         if let Ok(()) = timeout(AWAIT_TIMEOUT, joined).await {

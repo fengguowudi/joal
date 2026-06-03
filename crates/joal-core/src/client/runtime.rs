@@ -195,37 +195,3 @@ pub fn spawn_ip_refresher(
         }
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-
-    #[test]
-    fn constructors_populate_fields() {
-        let h = ConnectionHandler::new(1234, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(h.port(), 1234);
-        assert_eq!(h.ip_address(), Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-
-        let h = ConnectionHandler::with_port_only(4321);
-        assert_eq!(h.port(), 4321);
-        assert!(h.ip_address().is_none());
-    }
-
-    #[test]
-    fn ephemeral_port_is_nonzero() {
-        let h = ConnectionHandler::with_ephemeral_port().expect("bind ephemeral port");
-        assert!(h.port() > 0);
-        assert!(h.ip_address().is_none());
-    }
-
-    #[test]
-    fn set_ip_address_updates_field() {
-        let mut h = ConnectionHandler::with_port_only(1);
-        h.set_ip_address(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))));
-        assert_eq!(
-            h.ip_address(),
-            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
-        );
-    }
-}

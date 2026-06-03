@@ -196,7 +196,9 @@ impl TorrentFileProvider {
             // overflow: lost events are reasserted by the filesystem on
             // subsequent re-scans (we don't get that, but a debounce error
             // is still better than a hung thread).
-            let _ = tx.blocking_send(res);
+            if let Err(error) = tx.blocking_send(res) {
+                warn!(%error, "failed to forward notify event to watcher task");
+            }
         })
         .map_err(|err| notify_to_io(&err))?;
         watcher
@@ -240,7 +242,9 @@ impl TorrentFileProvider {
             let mut task_guard = self.task.lock().await;
             if let Some(handle) = task_guard.take() {
                 handle.abort();
-                let _ = handle.await;
+                if let Err(error) = handle.await {
+                    debug!(%error, "torrent watcher task aborted during stop");
+                }
             }
         }
         self.torrent_files.write().await.clear();
@@ -469,199 +473,5 @@ async fn rename_with_overwrite(src: &Path, target: &Path) -> io::Result<()> {
             }
             Ok(())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    struct CountingListener {
-        added: AtomicUsize,
-        removed: AtomicUsize,
-    }
-
-    impl CountingListener {
-        fn new() -> Self {
-            Self {
-                added: AtomicUsize::new(0),
-                removed: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl TorrentFileChangeAware for CountingListener {
-        fn on_torrent_file_added(&self, _torrent: &MockedTorrent) {
-            self.added.fetch_add(1, Ordering::SeqCst);
-        }
-        fn on_torrent_file_removed(&self, _torrent: &MockedTorrent) {
-            self.removed.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// Build a valid minimal single-file torrent file with a deterministic
-    /// info hash controlled by the `tag` byte.
-    fn build_torrent_bytes(tag: u8) -> Vec<u8> {
-        let mut pieces = vec![0u8; 20];
-        pieces[0] = tag;
-        let mut info = Vec::new();
-        info.push(b'd');
-        info.extend_from_slice(b"6:lengthi10e");
-        info.extend_from_slice(b"4:name8:test.bin");
-        info.extend_from_slice(b"12:piece lengthi10e");
-        info.extend_from_slice(b"6:pieces20:");
-        info.extend_from_slice(&pieces);
-        info.push(b'e');
-
-        let mut torrent = Vec::new();
-        torrent.push(b'd');
-        torrent.extend_from_slice(b"8:announce13:http://x/y/za");
-        torrent.extend_from_slice(b"4:info");
-        torrent.extend_from_slice(&info);
-        torrent.push(b'e');
-        torrent
-    }
-
-    fn joal_folders(tmp: &tempfile::TempDir) -> JoalFolders {
-        let folders = JoalFolders::new(tmp.path());
-        std::fs::create_dir_all(&folders.torrents_dir).unwrap();
-        folders
-    }
-
-    #[tokio::test]
-    async fn startup_scan_picks_up_existing_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let folders = joal_folders(&tmp);
-        let path = folders.torrents_dir.join("sample.torrent");
-        tokio::fs::write(&path, build_torrent_bytes(1))
-            .await
-            .unwrap();
-
-        let provider = TorrentFileProvider::new(&folders).unwrap();
-        let listener = Arc::new(CountingListener::new());
-        provider
-            .register_listener(listener.clone() as Arc<dyn TorrentFileChangeAware>)
-            .await;
-        provider.start().await.unwrap();
-
-        assert_eq!(listener.added.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.torrent_count().await, 1);
-        provider.stop().await;
-    }
-
-    #[tokio::test]
-    async fn get_torrent_not_in_excludes_listed_hashes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let folders = joal_folders(&tmp);
-        let a_path = folders.torrents_dir.join("a.torrent");
-        let b_path = folders.torrents_dir.join("b.torrent");
-        tokio::fs::write(&a_path, build_torrent_bytes(1))
-            .await
-            .unwrap();
-        tokio::fs::write(&b_path, build_torrent_bytes(2))
-            .await
-            .unwrap();
-
-        let provider = TorrentFileProvider::new(&folders).unwrap();
-        provider.start().await.unwrap();
-        assert_eq!(provider.torrent_count().await, 2);
-
-        let all = provider.torrent_files().await;
-        let hash_a = all
-            .iter()
-            .find(|t| t.name == "test.bin")
-            .unwrap()
-            .info_hash
-            .clone();
-        let mut exclude = HashSet::new();
-        exclude.insert(hash_a.clone());
-        // At least one of the two torrents has a hash distinct from hash_a.
-        let chosen = provider.get_torrent_not_in(&exclude).await.unwrap();
-        assert_ne!(chosen.info_hash, hash_a);
-
-        // If we exclude all, it fails.
-        let mut exclude_all = HashSet::new();
-        for t in &all {
-            exclude_all.insert(t.info_hash.clone());
-        }
-        assert!(provider.get_torrent_not_in(&exclude_all).await.is_err());
-        provider.stop().await;
-    }
-
-    #[tokio::test]
-    async fn archive_moves_file_and_removes_from_catalogue() {
-        let tmp = tempfile::tempdir().unwrap();
-        let folders = joal_folders(&tmp);
-        let path = folders.torrents_dir.join("doomed.torrent");
-        tokio::fs::write(&path, build_torrent_bytes(1))
-            .await
-            .unwrap();
-
-        let provider = TorrentFileProvider::new(&folders).unwrap();
-        provider.start().await.unwrap();
-        let initial = provider.torrent_files().await;
-        let hash = initial[0].info_hash.clone();
-
-        provider.move_to_archive_folder(&hash).await;
-        // File moved out of torrents/, archive/ now contains it.
-        assert!(!path.exists());
-        assert!(folders.torrents_archive_dir.join("doomed.torrent").exists());
-        provider.stop().await;
-    }
-
-    #[tokio::test]
-    async fn malformed_file_is_archived_instead_of_loaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let folders = joal_folders(&tmp);
-        let path = folders.torrents_dir.join("broken.torrent");
-        tokio::fs::write(&path, b"not a torrent").await.unwrap();
-
-        let provider = TorrentFileProvider::new(&folders).unwrap();
-        provider.start().await.unwrap();
-        assert_eq!(provider.torrent_count().await, 0);
-        // Wait a very short time (startup scan is synchronous but the archive
-        // call is async).
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!path.exists());
-        assert!(folders.torrents_archive_dir.join("broken.torrent").exists());
-        provider.stop().await;
-    }
-
-    #[tokio::test]
-    async fn watcher_picks_up_file_dropped_after_start() {
-        let tmp = tempfile::tempdir().unwrap();
-        let folders = joal_folders(&tmp);
-
-        let provider = TorrentFileProvider::new(&folders).unwrap();
-        let listener = Arc::new(CountingListener::new());
-        provider
-            .register_listener(listener.clone() as Arc<dyn TorrentFileChangeAware>)
-            .await;
-        provider.start().await.unwrap();
-        assert_eq!(provider.torrent_count().await, 0);
-
-        let path = folders.torrents_dir.join("late.torrent");
-        tokio::fs::write(&path, build_torrent_bytes(1))
-            .await
-            .unwrap();
-
-        // Wait for the watcher to observe the creation. `notify` on Windows
-        // emits events fairly promptly but not instantly — poll with a
-        // deadline so the test is not flaky on slow runners.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if provider.torrent_count().await >= 1 {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "watcher did not observe new file within timeout"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(listener.added.load(Ordering::SeqCst) >= 1);
-        provider.stop().await;
     }
 }

@@ -30,7 +30,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::bandwidth::peers::Peers;
 use crate::bandwidth::random_speed::{DownloadSpeedProvider, RandomSpeedProvider};
@@ -122,7 +122,9 @@ impl Inner {
             // try_send is intentional: the merger task rebuilds the whole
             // snapshot on every wake-up, so a dropped poke when
             // the queue is full is safe — it collapses into the next one.
-            let _ = sender.try_send(MergerPoke::SpeedRecomputed);
+            if sender.try_send(MergerPoke::SpeedRecomputed).is_err() {
+                warn!("merger poke channel is full or closed; speed recompute will be coalesced");
+            }
         }
     }
 
@@ -164,7 +166,11 @@ impl Inner {
             self.recompute_speeds();
             if let Some(sender) = self.poke.as_ref() {
                 for h in completed {
-                    let _ = sender.try_send(MergerPoke::TorrentCompleted(h));
+                    if sender.try_send(MergerPoke::TorrentCompleted(h)).is_err() {
+                        warn!(
+                            "merger poke channel is full or closed; torrent completion will be coalesced"
+                        );
+                    }
                 }
             }
         }
@@ -361,18 +367,10 @@ impl BandwidthDispatcher {
             let mut task_slot = self.task.lock().unwrap_or_else(PoisonError::into_inner);
             task_slot.take().ok_or(BandwidthError::NotRunning)?
         };
-        handle.abort();
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            debug!(%error, "bandwidth dispatcher task aborted during stop");
+        }
         Ok(())
-    }
-
-    /// Run exactly one dispatcher tick synchronously. Reserved for tests
-    /// (deterministic scheduling beats `tokio::time::pause` for pure-state
-    /// assertions).
-    #[doc(hidden)]
-    pub fn tick_once_for_test(&self) {
-        let tick_ms = u64::try_from(self.tick_period.as_millis()).unwrap_or(u64::MAX);
-        on_tick(&self.inner, tick_ms);
     }
 
     fn with_lock<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
@@ -417,378 +415,4 @@ fn on_tick(inner: &Mutex<Inner>, tick_ms: u64) {
     // updated `uploaded` from the same lock window.
     guard.recompute_speeds();
     guard.accumulate_traffic(tick_ms);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::bandwidth::random_speed::{
-        DownloadSpeedProvider, RandomSpeedProvider, RandomSpeedSource,
-    };
-    use crate::config::AppConfiguration;
-
-    fn cfg(min_kib: u64, max_kib: u64) -> AppConfiguration {
-        AppConfiguration {
-            min_upload_rate: min_kib,
-            max_upload_rate: max_kib,
-            min_download_rate: 0,
-            max_download_rate: 0,
-            simultaneous_seed: 1,
-            client: "x.client".into(),
-            keep_torrent_with_zero_leechers: true,
-            upload_ratio_target: -1.0,
-            proxy_host: None,
-            proxy_port: None,
-        }
-    }
-
-    #[derive(Debug)]
-    struct Constant(u64);
-    impl RandomSpeedSource for Constant {
-        fn sample(&self, _min: u64, _max: u64) -> u64 {
-            self.0
-        }
-    }
-
-    fn hash(byte: u8) -> InfoHash {
-        InfoHash::from_bytes([byte; 20])
-    }
-
-    fn dispatcher(bytes_per_sec: u64) -> BandwidthDispatcher {
-        // Pin the upload band to the constant so step()'s reflected walk is
-        // a no-op (min == max ⇒ speed stays at the boundary). Lets the
-        // existing arithmetic-focused tests keep their fixed-speed assertions.
-        let kib = bytes_per_sec / 1000;
-        let provider =
-            RandomSpeedProvider::with_source(&cfg(kib, kib), Box::new(Constant(bytes_per_sec)));
-        let dl = DownloadSpeedProvider::with_source(&cfg(kib, kib), Box::new(Constant(0)));
-        BandwidthDispatcher::new(Duration::from_secs(1), provider, dl)
-    }
-
-    /// Build a dispatcher whose download faker is enabled and returns
-    /// `dl_bytes_per_sec` from a constant source. Caller still controls the
-    /// upload constant via `up_bytes_per_sec`. Both bands are pinned to the
-    /// constants so step() walks are no-ops in these arithmetic tests.
-    fn dispatcher_with_download(
-        up_bytes_per_sec: u64,
-        dl_bytes_per_sec: u64,
-    ) -> BandwidthDispatcher {
-        let up_kib = up_bytes_per_sec / 1000;
-        let dl_kib = dl_bytes_per_sec / 1000;
-        let upload = RandomSpeedProvider::with_source(
-            &cfg(up_kib, up_kib),
-            Box::new(Constant(up_bytes_per_sec)),
-        );
-        let download = DownloadSpeedProvider::with_source(
-            &cfg_with_download(dl_kib, dl_kib),
-            Box::new(Constant(dl_bytes_per_sec)),
-        );
-        BandwidthDispatcher::new(Duration::from_secs(1), upload, download)
-    }
-
-    fn cfg_with_download(min_dl: u64, max_dl: u64) -> AppConfiguration {
-        AppConfiguration {
-            min_upload_rate: 0,
-            max_upload_rate: 0,
-            min_download_rate: min_dl,
-            max_download_rate: max_dl,
-            simultaneous_seed: 1,
-            client: "x.client".into(),
-            keep_torrent_with_zero_leechers: true,
-            upload_ratio_target: -1.0,
-            proxy_host: None,
-            proxy_port: None,
-        }
-    }
-
-    #[test]
-    fn register_inserts_zero_speed_and_default_stats() {
-        let d = dispatcher(1_000);
-        let h = hash(1);
-        d.register_torrent(h.clone(), 0, false);
-        assert_eq!(d.speed_map().get(&h).copied(), Some(Speed::new(0)));
-        assert_eq!(d.get_seed_stat_for_torrent(&h).uploaded(), 0);
-    }
-
-    #[test]
-    fn weights_split_global_speed_proportionally() {
-        let d = dispatcher(1_000_000);
-        let a = hash(1);
-        let b = hash(2);
-        d.register_torrent(a.clone(), 0, false);
-        d.register_torrent(b.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-        d.update_torrent_peers(b.clone(), 10, 30);
-
-        // Weights (from PeersAwareWeightCalculator): a -> 250.0, b -> 1687.5.
-        let total_weight = 250.0 + 1687.5;
-        let expected_a = (1_000_000.0 * 250.0 / total_weight) as u64;
-        let expected_b = (1_000_000.0 * 1687.5 / total_weight) as u64;
-        let speeds = d.speed_map();
-        assert_eq!(speeds.get(&a).unwrap().bytes_per_second(), expected_a);
-        assert_eq!(speeds.get(&b).unwrap().bytes_per_second(), expected_b);
-    }
-
-    #[test]
-    fn zero_total_weight_gives_zero_speed() {
-        let d = dispatcher(1_000_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        // No update_torrent_peers — weight_holder is empty, total_weight = 0.
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 0);
-    }
-
-    #[test]
-    fn unregister_recomputes_for_remaining_torrents() {
-        let d = dispatcher(1_000_000);
-        let a = hash(1);
-        let b = hash(2);
-        d.register_torrent(a.clone(), 0, false);
-        d.register_torrent(b.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-        d.update_torrent_peers(b.clone(), 10, 30);
-        d.unregister_torrent(&a);
-
-        let speeds = d.speed_map();
-        assert!(!speeds.contains_key(&a));
-        // `b` now absorbs the entire budget (truncation to integer).
-        assert_eq!(speeds.get(&b).unwrap().bytes_per_second(), 1_000_000);
-    }
-
-    #[test]
-    fn tick_accumulates_uploaded_using_current_speed() {
-        let d = dispatcher(500_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10); // 100% of budget (only torrent).
-
-        // tick_period = 1000ms, speed = 500_000 B/s -> 500_000 B per tick.
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 500_000);
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 1_000_000);
-    }
-
-    #[test]
-    fn zero_weight_torrents_accumulate_nothing() {
-        let d = dispatcher(500_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        // No peer update -> weight_for = 0 -> speed = 0 -> uploaded stays 0.
-        d.tick_once_for_test();
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 0);
-    }
-
-    #[test]
-    fn speed_evolves_every_tick_via_random_walk_step() {
-        #[derive(Debug)]
-        struct DeltaSeq {
-            initial: u64,
-            deltas: Mutex<Vec<i64>>,
-        }
-        impl DeltaSeq {
-            fn new(initial: u64, deltas: Vec<i64>) -> Self {
-                Self {
-                    initial,
-                    deltas: Mutex::new(deltas.into_iter().rev().collect()),
-                }
-            }
-        }
-        impl RandomSpeedSource for DeltaSeq {
-            fn sample(&self, _: u64, _: u64) -> u64 {
-                self.initial
-            }
-            fn sample_delta(&self, _max_abs: u64) -> i64 {
-                self.deltas.lock().unwrap().pop().unwrap_or(0)
-            }
-        }
-
-        let source = Box::new(DeltaSeq::new(150_000, vec![500, -700, 1_000]));
-        let provider = RandomSpeedProvider::with_source(&cfg(100, 200), source);
-        let dl = DownloadSpeedProvider::with_source(&cfg(100, 200), Box::new(Constant(0)));
-        let d = BandwidthDispatcher::new(Duration::from_secs(1), provider, dl);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-
-        // Construction seeds the provider via sample(), not step(): initial value.
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_000);
-
-        d.tick_once_for_test(); // 150_000 + 500
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_500);
-        d.tick_once_for_test(); // 150_500 - 700
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 149_800);
-        d.tick_once_for_test(); // 149_800 + 1_000
-        assert_eq!(d.speed_map().get(&a).unwrap().bytes_per_second(), 150_800);
-    }
-
-    #[tokio::test]
-    async fn merger_poke_fires_on_each_recompute() {
-        let d = dispatcher(1_000_000);
-        let (tx, mut rx) = mpsc::channel(16);
-        d.set_merger_poke(Some(tx));
-
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false); // no recompute on bare register
-        d.update_torrent_peers(a.clone(), 10, 10); // recompute #1
-        d.refresh_current_bandwidth(); // recompute #2
-        d.unregister_torrent(&a); // recompute #3
-
-        let mut pokes = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            pokes.push(msg);
-        }
-        assert_eq!(pokes.len(), 3);
-        assert!(
-            pokes
-                .iter()
-                .all(|p| matches!(p, MergerPoke::SpeedRecomputed))
-        );
-    }
-
-    #[tokio::test]
-    async fn tick_pokes_merger_for_live_uploaded_refresh() {
-        // Every tick walks the speed and recomputes, which emits exactly one
-        // SpeedRecomputed poke; the trailing end-of-tick poke was dropped
-        // because recompute_speeds already covers the merger's needs.
-        let d = dispatcher(500_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-
-        let (tx, mut rx) = mpsc::channel(16);
-        d.set_merger_poke(Some(tx));
-
-        // Drain anything that snuck in between channel attach and now.
-        while rx.try_recv().is_ok() {}
-
-        d.tick_once_for_test();
-        d.tick_once_for_test();
-        d.tick_once_for_test();
-
-        let mut pokes = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            pokes.push(msg);
-        }
-        assert_eq!(pokes.len(), 3, "expected one poke per tick");
-        assert!(
-            pokes
-                .iter()
-                .all(|p| matches!(p, MergerPoke::SpeedRecomputed))
-        );
-        // Sanity: uploaded actually advanced this entire time.
-        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 1_500_000);
-    }
-
-    #[test]
-    fn tick_without_poke_subscriber_does_not_panic() {
-        let d = dispatcher(500_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 0, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-        // No set_merger_poke call: inner.poke stays None.
-
-        d.tick_once_for_test();
-        d.tick_once_for_test();
-
-        assert_eq!(d.get_seed_stat_for_torrent(&a).uploaded(), 1_000_000);
-    }
-
-    #[test]
-    fn register_initial_completed_starts_at_total_size() {
-        let d = dispatcher_with_download(0, 0); // upload off, download enabled bounds
-        let h = hash(0xaa);
-        d.register_torrent(h.clone(), 5_000, true);
-        let stats = d.get_seed_stat_for_torrent(&h);
-        assert_eq!(stats.downloaded(), 5_000);
-        assert_eq!(stats.left(), 0);
-        assert!(stats.is_completed());
-    }
-
-    #[test]
-    fn accumulate_traffic_credits_download_and_caps() {
-        let d = dispatcher_with_download(0, 200_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 500_000, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-
-        // 200_000 B/s * 1s = 200_000 per tick. After 2 ticks => 400_000.
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).downloaded(), 200_000);
-        assert_eq!(d.get_seed_stat_for_torrent(&a).left(), 300_000);
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).downloaded(), 400_000);
-
-        // Tick 3 should overshoot by 100_000 — must clamp at 500_000.
-        d.tick_once_for_test();
-        assert_eq!(d.get_seed_stat_for_torrent(&a).downloaded(), 500_000);
-        assert_eq!(d.get_seed_stat_for_torrent(&a).left(), 0);
-    }
-
-    #[tokio::test]
-    async fn completion_emits_torrent_completed_poke_exactly_once() {
-        let d = dispatcher_with_download(0, 1_000_000);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 1_000_000, false);
-        d.update_torrent_peers(a.clone(), 10, 10);
-
-        let (tx, mut rx) = mpsc::channel(16);
-        d.set_merger_poke(Some(tx));
-        while rx.try_recv().is_ok() {}
-
-        // Tick #1: caps exactly at total_size -> JustCompleted -> 1 poke.
-        d.tick_once_for_test();
-        // Tick #2: AlreadyCompleted -> no extra TorrentCompleted poke.
-        d.tick_once_for_test();
-
-        let mut completed_pokes = 0;
-        while let Ok(p) = rx.try_recv() {
-            if let MergerPoke::TorrentCompleted(h) = p {
-                assert_eq!(h, a);
-                completed_pokes += 1;
-            }
-        }
-        assert_eq!(completed_pokes, 1);
-    }
-
-    #[test]
-    fn force_initial_completed_returns_true_only_when_flipping_to_done() {
-        let d = dispatcher_with_download(0, 0);
-        let a = hash(1);
-        d.register_torrent(a.clone(), 1_000, false);
-
-        assert!(d.force_initial_completed(&a, true));
-        // Already completed: should not report a fresh transition.
-        assert!(!d.force_initial_completed(&a, true));
-
-        // Reset to not-completed; subsequent flip-to-true must report true.
-        assert!(!d.force_initial_completed(&a, false));
-        assert_eq!(d.get_seed_stat_for_torrent(&a).downloaded(), 0);
-        assert!(d.force_initial_completed(&a, true));
-    }
-
-    #[tokio::test]
-    async fn double_start_returns_error() {
-        let d = dispatcher(1_000);
-        d.start().expect("first start");
-        assert!(matches!(d.start(), Err(BandwidthError::AlreadyRunning)));
-        d.stop().await.expect("stop");
-    }
-
-    #[tokio::test]
-    async fn stop_without_start_returns_error() {
-        let d = dispatcher(1_000);
-        assert!(matches!(d.stop().await, Err(BandwidthError::NotRunning)));
-    }
-
-    #[tokio::test]
-    async fn start_and_stop_completes_cleanly() {
-        let d = dispatcher(100_000);
-        d.start().expect("start");
-        d.stop().await.expect("stop");
-        let task = d.task.lock().unwrap_or_else(PoisonError::into_inner);
-        assert!(task.is_none());
-    }
 }

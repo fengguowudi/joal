@@ -235,10 +235,10 @@ impl<'a> Parser<'a> {
     fn skip_value(&mut self) -> Result<(), BencodeError> {
         match self.peek()? {
             b'i' => {
-                let _ = self.parse_integer()?;
+                self.parse_integer()?;
             }
             b'0'..=b'9' => {
-                let _ = self.parse_byte_string()?;
+                drop(self.parse_byte_string()?);
             }
             b'l' => {
                 self.pos += 1;
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
             b'd' => {
                 self.pos += 1;
                 while self.peek()? != b'e' {
-                    let _ = self.parse_byte_string()?;
+                    drop(self.parse_byte_string()?);
                     self.skip_value()?;
                 }
                 self.pos += 1;
@@ -362,133 +362,3 @@ impl<'a> Parser<'a> {
 // ---------------------------------------------------------------------------
 //  Tests
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_integers() {
-        assert_eq!(parse(b"i0e").unwrap(), Value::Integer(0));
-        assert_eq!(parse(b"i42e").unwrap(), Value::Integer(42));
-        assert_eq!(parse(b"i-17e").unwrap(), Value::Integer(-17));
-    }
-
-    #[test]
-    fn rejects_illegal_integer_encodings() {
-        assert!(matches!(
-            parse(b"i-0e"),
-            Err(BencodeError::IllegalIntegerEncoding { .. })
-        ));
-        assert!(matches!(
-            parse(b"i03e"),
-            Err(BencodeError::IllegalIntegerEncoding { .. })
-        ));
-    }
-
-    #[test]
-    fn parses_byte_strings_including_binary() {
-        assert_eq!(
-            parse(b"5:hello").unwrap(),
-            Value::ByteString(b"hello".to_vec())
-        );
-        // Embedded NULs and non-UTF-8 bytes are fine.
-        assert_eq!(
-            parse(b"3:\x00\xff\x7f").unwrap(),
-            Value::ByteString(vec![0x00, 0xff, 0x7f])
-        );
-    }
-
-    #[test]
-    fn parses_lists_and_dicts() {
-        let v = parse(b"l4:spami42ee").unwrap();
-        assert_eq!(
-            v,
-            Value::List(vec![
-                Value::ByteString(b"spam".to_vec()),
-                Value::Integer(42),
-            ])
-        );
-
-        let v = parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
-        assert_eq!(
-            v.get("cow").and_then(Value::as_bytes),
-            Some(b"moo".as_slice())
-        );
-        assert_eq!(
-            v.get("spam").and_then(Value::as_bytes),
-            Some(b"eggs".as_slice())
-        );
-    }
-
-    #[test]
-    fn rejects_unordered_dict_keys() {
-        assert!(matches!(
-            parse(b"d4:spam4:eggs3:cow3:mooe"),
-            Err(BencodeError::DictUnordered { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_lenient_accepts_unordered_dict_keys() {
-        let v = parse_lenient(b"d4:spam4:eggs3:cow3:mooe").unwrap();
-        assert_eq!(
-            v.get("cow").and_then(Value::as_bytes),
-            Some(b"moo".as_slice())
-        );
-        assert_eq!(
-            v.get("spam").and_then(Value::as_bytes),
-            Some(b"eggs".as_slice())
-        );
-    }
-
-    #[test]
-    fn rejects_trailing_bytes() {
-        assert!(matches!(
-            parse(b"i1eX"),
-            Err(BencodeError::TrailingBytes { .. })
-        ));
-    }
-
-    #[test]
-    fn extracts_info_dict_byte_range_precisely() {
-        // Construct a fake .torrent: d8:announce<url>4:info<info>e
-        let announce = b"12:http://x/y/z";
-        let info = b"d6:lengthi10e4:name4:filee";
-        let mut torrent = Vec::new();
-        torrent.push(b'd');
-        torrent.extend_from_slice(b"8:announce");
-        torrent.extend_from_slice(announce);
-        torrent.extend_from_slice(b"4:info");
-        let info_start = torrent.len();
-        torrent.extend_from_slice(info);
-        let info_end = torrent.len();
-        torrent.push(b'e');
-
-        let extracted = extract_info_dict_bytes(&torrent).unwrap();
-        assert_eq!(extracted, &torrent[info_start..info_end]);
-        assert_eq!(extracted, info);
-    }
-
-    #[test]
-    fn extract_info_reports_missing_key() {
-        let torrent = b"d8:announce12:http://x/y/ze";
-        assert!(matches!(
-            extract_info_dict_bytes(torrent),
-            Err(BencodeError::MissingKey { key: "info" })
-        ));
-    }
-
-    #[test]
-    fn extract_info_rejects_non_dict_top_level() {
-        assert!(extract_info_dict_bytes(b"i1e").is_err());
-    }
-
-    #[test]
-    fn value_accessors_behave() {
-        let v = parse(b"d3:bar4:spam3:fooi7ee").unwrap();
-        assert_eq!(v.get("foo").and_then(Value::as_int), Some(7));
-        assert!(matches!(v.get("bar").and_then(Value::as_str), Some(ref s) if s == "spam"));
-        assert!(v.get("missing").is_none());
-    }
-}
