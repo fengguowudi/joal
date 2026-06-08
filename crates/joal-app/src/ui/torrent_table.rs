@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use joal_core::snapshot::{EngineSnapshot, TorrentStatus};
 use tokio::sync::mpsc;
@@ -15,8 +17,9 @@ use torrent_table_format::{
 #[path = "torrent_table_format.rs"]
 mod torrent_table_format;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum SortColumn {
+    #[default]
     Name,
     Progress,
     UploadSpeed,
@@ -29,8 +32,9 @@ enum SortColumn {
     Health,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortDirection {
+    #[default]
     Ascending,
     Descending,
 }
@@ -49,6 +53,7 @@ pub(super) struct TableState {
     pub attention_only: bool,
     sort_column: SortColumn,
     sort_direction: SortDirection,
+    visible_cache: VisibleTorrentCache,
 }
 
 impl Default for TableState {
@@ -58,7 +63,49 @@ impl Default for TableState {
             attention_only: false,
             sort_column: SortColumn::Name,
             sort_direction: SortDirection::Ascending,
+            visible_cache: VisibleTorrentCache::default(),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct VisibleTorrentCache {
+    key: VisibleCacheKey,
+    visible_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct VisibleCacheKey {
+    torrents_fingerprint: u64,
+    query: String,
+    attention_only: bool,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+}
+
+#[derive(Debug)]
+struct TorrentSearchSortKey {
+    index: usize,
+    name_lower: String,
+    info_hash: String,
+    progress: f64,
+    health: (u8, u32, u32),
+}
+
+impl TableState {
+    fn visible_indices(&mut self, torrents: &[TorrentStatus]) -> &[usize] {
+        let key = VisibleCacheKey {
+            torrents_fingerprint: torrents_fingerprint(torrents),
+            query: self.search_query.trim().to_lowercase(),
+            attention_only: self.attention_only,
+            sort_column: self.sort_column,
+            sort_direction: self.sort_direction,
+        };
+        if self.visible_cache.key != key {
+            self.visible_cache.visible_indices = compute_visible_torrent_indices(torrents, &key);
+            self.visible_cache.key = key;
+        }
+        &self.visible_cache.visible_indices
     }
 }
 
@@ -119,7 +166,7 @@ pub(super) fn toolbar(
                 "",
                 &format!(
                     "{}/{}",
-                    visible_count(snapshot, table_state),
+                    table_state.visible_indices(&snapshot.torrents).len(),
                     snapshot.torrents.len()
                 ),
                 theme::Tone::Neutral,
@@ -144,7 +191,7 @@ pub fn show(
         return;
     }
 
-    let visible_indices = visible_torrent_indices(&snapshot.torrents, table_state);
+    let visible_indices = table_state.visible_indices(&snapshot.torrents).to_vec();
     if visible_indices.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(egui::RichText::new(t.no_matching_torrents).color(theme::text_secondary()));
@@ -327,38 +374,38 @@ impl TableRender<'_> {
         row.col(|ui| name_cell(ui, row_index, torrent));
         row.col(|ui| progress_cell(ui, row_index, torrent));
         row.col(|ui| {
-            speed_cell(
+            value_cell(
                 ui,
                 row_index,
                 "upload_speed",
-                torrent.current_speed_bps,
+                format_speed(torrent.current_speed_bps),
                 theme::text_primary(),
             );
         });
         row.col(|ui| {
-            bytes_cell(
+            value_cell(
                 ui,
                 row_index,
                 "uploaded",
-                torrent.uploaded_bytes,
+                format_bytes(torrent.uploaded_bytes),
                 theme::text_primary(),
             );
         });
         row.col(|ui| {
-            speed_cell(
+            value_cell(
                 ui,
                 row_index,
                 "download_speed",
-                torrent.current_download_speed_bps,
+                format_speed(torrent.current_download_speed_bps),
                 theme::text_secondary(),
             );
         });
         row.col(|ui| {
-            bytes_cell(
+            value_cell(
                 ui,
                 row_index,
                 "downloaded",
-                torrent.downloaded_bytes,
+                format_bytes(torrent.downloaded_bytes),
                 theme::text_secondary(),
             );
         });
@@ -428,27 +475,15 @@ fn progress_cell(ui: &mut egui::Ui, row_index: usize, torrent: &TorrentStatus) {
     });
 }
 
-fn speed_cell(
+fn value_cell(
     ui: &mut egui::Ui,
     row_index: usize,
     key: &'static str,
-    bps: u64,
+    text: String,
     color: egui::Color32,
 ) {
     cell_scope(ui, row_index, key, |ui| {
-        ui.label(egui::RichText::new(format_speed(bps)).color(color));
-    });
-}
-
-fn bytes_cell(
-    ui: &mut egui::Ui,
-    row_index: usize,
-    key: &'static str,
-    bytes: u64,
-    color: egui::Color32,
-) {
-    cell_scope(ui, row_index, key, |ui| {
-        ui.label(egui::RichText::new(format_bytes(bytes)).color(color));
+        ui.label(egui::RichText::new(text).color(color));
     });
 }
 
@@ -533,36 +568,46 @@ fn actions_cell(
     });
 }
 
-fn visible_count(snapshot: &EngineSnapshot, table_state: &TableState) -> usize {
-    visible_torrent_indices(&snapshot.torrents, table_state).len()
-}
-
-fn visible_torrent_indices(torrents: &[TorrentStatus], table_state: &TableState) -> Vec<usize> {
-    let query = table_state.search_query.trim().to_lowercase();
-    let mut visible = torrents
+fn compute_visible_torrent_indices(
+    torrents: &[TorrentStatus],
+    key: &VisibleCacheKey,
+) -> Vec<usize> {
+    let keys = torrents
         .iter()
         .enumerate()
-        .filter(|(_, torrent)| matches_search(torrent, &query))
-        .filter(|(_, torrent)| !table_state.attention_only || needs_attention(torrent))
-        .map(|(index, _)| index)
+        .map(|(index, torrent)| TorrentSearchSortKey {
+            index,
+            name_lower: torrent.name.to_lowercase(),
+            info_hash: torrent.info_hash.to_string(),
+            progress: progress_fraction(torrent),
+            health: health_sort_key(torrent),
+        })
+        .collect::<Vec<_>>();
+
+    let mut visible = keys
+        .iter()
+        .filter(|torrent_key| matches_search(torrent_key, &key.query))
+        .filter(|torrent_key| !key.attention_only || needs_attention(&torrents[torrent_key.index]))
+        .map(|torrent_key| torrent_key.index)
         .collect::<Vec<_>>();
 
     visible.sort_by(|left, right| {
         compare_torrents(
             &torrents[*left],
             &torrents[*right],
-            table_state.sort_column,
-            table_state.sort_direction,
+            &keys[*left],
+            &keys[*right],
+            key.sort_column,
+            key.sort_direction,
         )
     });
     visible
 }
 
-fn matches_search(torrent: &TorrentStatus, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    torrent.name.to_lowercase().contains(query) || torrent.info_hash.to_string().contains(query)
+fn matches_search(torrent_key: &TorrentSearchSortKey, query: &str) -> bool {
+    query.is_empty()
+        || torrent_key.name_lower.contains(query)
+        || torrent_key.info_hash.contains(query)
 }
 
 fn needs_attention(torrent: &TorrentStatus) -> bool {
@@ -574,12 +619,14 @@ fn needs_attention(torrent: &TorrentStatus) -> bool {
 fn compare_torrents(
     left: &TorrentStatus,
     right: &TorrentStatus,
+    left_key: &TorrentSearchSortKey,
+    right_key: &TorrentSearchSortKey,
     column: SortColumn,
     direction: SortDirection,
 ) -> Ordering {
     let ordering = match column {
-        SortColumn::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-        SortColumn::Progress => progress_fraction(left).total_cmp(&progress_fraction(right)),
+        SortColumn::Name => left_key.name_lower.cmp(&right_key.name_lower),
+        SortColumn::Progress => left_key.progress.total_cmp(&right_key.progress),
         SortColumn::UploadSpeed => left.current_speed_bps.cmp(&right.current_speed_bps),
         SortColumn::Uploaded => left.uploaded_bytes.cmp(&right.uploaded_bytes),
         SortColumn::DownloadSpeed => left
@@ -595,7 +642,7 @@ fn compare_torrents(
             .unwrap_or_default()
             .cmp(&right.last_known_leechers.unwrap_or_default()),
         SortColumn::LastAnnounce => left.last_announced_at.cmp(&right.last_announced_at),
-        SortColumn::Health => health_sort_key(left).cmp(&health_sort_key(right)),
+        SortColumn::Health => left_key.health.cmp(&right_key.health),
     };
 
     match direction {
@@ -618,6 +665,27 @@ fn default_sort_direction(column: SortColumn) -> SortDirection {
         | SortColumn::LastAnnounce
         | SortColumn::Health => SortDirection::Descending,
     }
+}
+
+fn torrents_fingerprint(torrents: &[TorrentStatus]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    torrents.len().hash(&mut hasher);
+    for torrent in torrents {
+        torrent.info_hash.hash(&mut hasher);
+        torrent.name.hash(&mut hasher);
+        torrent.total_size.hash(&mut hasher);
+        torrent.uploaded_bytes.hash(&mut hasher);
+        torrent.downloaded_bytes.hash(&mut hasher);
+        torrent.left_bytes.hash(&mut hasher);
+        torrent.current_speed_bps.hash(&mut hasher);
+        torrent.current_download_speed_bps.hash(&mut hasher);
+        torrent.initial_completed.hash(&mut hasher);
+        torrent.last_known_seeders.hash(&mut hasher);
+        torrent.last_known_leechers.hash(&mut hasher);
+        torrent.consecutive_fails.hash(&mut hasher);
+        torrent.last_announced_at.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn health_sort_key(torrent: &TorrentStatus) -> (u8, u32, u32) {

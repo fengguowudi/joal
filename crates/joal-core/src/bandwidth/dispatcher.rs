@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, warn};
 
@@ -177,6 +177,15 @@ impl Inner {
     }
 }
 
+/// Batched read-only state snapshot for callers that need speeds and stats for
+/// many torrents at once.
+#[derive(Clone, Debug, Default)]
+pub struct BandwidthSnapshot {
+    pub speeds: HashMap<InfoHash, Speed>,
+    pub download_speeds: HashMap<InfoHash, Speed>,
+    pub stats: HashMap<InfoHash, TorrentSeedStats>,
+}
+
 /// Handle for the bandwidth dispatcher task.
 ///
 /// The handle is deliberately not `Clone`: lifecycle (start/stop) is
@@ -307,11 +316,14 @@ impl BandwidthDispatcher {
         self.with_lock(|inner| inner.speed_map.clone())
     }
 
-    /// Per-torrent slice of the *download* budget, mirroring [`Self::speed_map`].
-    /// Always returns 0 entries when the download faker is disabled (0/0).
+    /// Single-lock snapshot of every per-torrent speed/stat map.
     #[must_use]
-    pub fn download_speed_map(&self) -> HashMap<InfoHash, Speed> {
-        self.with_lock(|inner| inner.download_speed_map.clone())
+    pub fn snapshot(&self) -> BandwidthSnapshot {
+        self.with_lock(|inner| BandwidthSnapshot {
+            speeds: inner.speed_map.clone(),
+            download_speeds: inner.download_speed_map.clone(),
+            stats: inner.torrents_seed_stats.clone(),
+        })
     }
 
     /// Hot-update the speed-provider limits from a (possibly reloaded)
@@ -367,8 +379,11 @@ impl BandwidthDispatcher {
             let mut task_slot = self.task.lock().unwrap_or_else(PoisonError::into_inner);
             task_slot.take().ok_or(BandwidthError::NotRunning)?
         };
-        if let Err(error) = handle.await {
-            debug!(%error, "bandwidth dispatcher task aborted during stop");
+        handle.abort();
+        if let Err(error) = handle.await
+            && !is_expected_abort(&error)
+        {
+            debug!(%error, "bandwidth dispatcher task ended during stop");
         }
         Ok(())
     }
@@ -404,6 +419,10 @@ impl Drop for BandwidthDispatcher {
             handle.abort();
         }
     }
+}
+
+fn is_expected_abort(error: &JoinError) -> bool {
+    error.is_cancelled()
 }
 
 fn on_tick(inner: &Mutex<Inner>, tick_ms: u64) {

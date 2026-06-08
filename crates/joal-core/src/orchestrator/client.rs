@@ -360,6 +360,19 @@ impl SharedState {
     fn is_stopping(&self) -> bool {
         self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Spawn a detached task that moves `info_hash`'s torrent file to the
+    /// archive folder. Shared by the upload-ratio and no-more-peers drop paths.
+    fn spawn_archive(&self, info_hash: &InfoHash) {
+        let shared = self.self_arc();
+        let info_hash = info_hash.clone();
+        tokio::spawn(async move {
+            shared
+                .torrent_provider
+                .move_to_archive_folder(&info_hash)
+                .await;
+        });
+    }
 }
 
 async fn orchestrator_loop(
@@ -423,28 +436,14 @@ impl OrchestratorControl for SharedState {
 
     fn on_upload_ratio_limit_reached(&self, info_hash: &InfoHash) {
         info!(info_hash = %info_hash, "upload ratio reached, archiving torrent");
-        let shared = self.self_arc();
-        let info_hash = info_hash.clone();
-        tokio::spawn(async move {
-            shared
-                .torrent_provider
-                .move_to_archive_folder(&info_hash)
-                .await;
-        });
+        self.spawn_archive(info_hash);
     }
 
     fn on_no_more_peers(&self, info_hash: &InfoHash) {
         if self.app_config.keep_torrent_with_zero_leechers {
             return;
         }
-        let shared = self.self_arc();
-        let info_hash = info_hash.clone();
-        tokio::spawn(async move {
-            shared
-                .torrent_provider
-                .move_to_archive_folder(&info_hash)
-                .await;
-        });
+        self.spawn_archive(info_hash);
     }
 
     fn on_torrent_has_stopped(&self, info_hash: &InfoHash) {

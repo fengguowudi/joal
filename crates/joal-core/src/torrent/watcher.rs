@@ -196,8 +196,8 @@ impl TorrentFileProvider {
             // overflow: lost events are reasserted by the filesystem on
             // subsequent re-scans (we don't get that, but a debounce error
             // is still better than a hung thread).
-            if let Err(error) = tx.blocking_send(res) {
-                warn!(%error, "failed to forward notify event to watcher task");
+            if let Err(error) = tx.try_send(res) {
+                warn!(%error, "watcher event channel is full or closed; notify event coalesced");
             }
         })
         .map_err(|err| notify_to_io(&err))?;
@@ -335,17 +335,8 @@ impl TorrentFileProvider {
         // Remove the torrent from the catalogue first, matching Java's
         // `onFileDelete -> moveToArchiveFolder` ordering.
         self.on_file_delete(file).await;
-
-        let Some(name) = file.file_name() else {
-            warn!(path = %file.display(), "archive target has no file name");
-            return;
-        };
-        let target = self.archive_dir.join(name);
-        if rename_with_overwrite(file, &target).await.is_err() {
-            // All error paths are already logged by `rename_with_overwrite`.
-            return;
-        }
-        info!(source = %file.display(), "successfully moved file to archive folder");
+        self.archive_path(file, "successfully moved file to archive folder")
+            .await;
     }
 
     async fn handle_event(self: &Arc<Self>, event: Event) {
@@ -411,18 +402,27 @@ impl TorrentFileProvider {
     /// Archive a raw file path (used by the watcher when a parse fails before
     /// the file enters the map).
     async fn move_path_to_archive(&self, file: &Path) {
+        self.archive_path(file, "archived malformed torrent file")
+            .await;
+    }
+
+    /// Shared archive move: validate the path, build the archive target under
+    /// `archive_dir`, and rename with overwrite. `success_msg` is the caller's
+    /// success log line. All error paths are logged inside
+    /// `rename_with_overwrite`, so a failed move returns quietly here.
+    async fn archive_path(&self, file: &Path, success_msg: &str) {
         if !file.exists() {
             return;
         }
         let Some(name) = file.file_name() else {
+            warn!(path = %file.display(), "archive target has no file name");
             return;
         };
         let target = self.archive_dir.join(name);
         if rename_with_overwrite(file, &target).await.is_err() {
-            // All error paths are already logged by `rename_with_overwrite`.
             return;
         }
-        info!(source = %file.display(), "archived malformed torrent file");
+        info!(source = %file.display(), message = success_msg, "archived file");
     }
 }
 

@@ -36,7 +36,7 @@
 //!
 //! On every wake-up it rebuilds the snapshot from scratch by joining the
 //! orchestrator's announcer list with
-//! `BandwidthDispatcher::get_seed_stat_for_torrent` + `speed_map`. Rebuilding
+//! `BandwidthDispatcher::snapshot`. Rebuilding
 //! is O(torrents) and cheaper than the alternative (diffing event payloads)
 //! for the 10–100 torrent case joal targets.
 
@@ -534,8 +534,7 @@ fn publish_snapshot(deps: &MergerDeps, snapshot_tx: &watch::Sender<EngineSnapsho
 }
 
 fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
-    let speeds = deps.bandwidth.speed_map();
-    let download_speeds = deps.bandwidth.download_speed_map();
+    let bandwidth = deps.bandwidth.snapshot();
     let announcers = deps.orchestrator.announcers_snapshot();
 
     let mut torrents = Vec::with_capacity(announcers.len());
@@ -543,17 +542,21 @@ fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
     let mut global_dl_bps: u64 = 0;
     for announcer in &announcers {
         let snap = announcer.facade_snapshot();
-        let current_speed_bps = speeds
+        let current_speed_bps = bandwidth
+            .speeds
             .get(&snap.torrent_info_hash)
             .map_or(0, crate::bandwidth::Speed::bytes_per_second);
-        let current_download_speed_bps = download_speeds
+        let current_download_speed_bps = bandwidth
+            .download_speeds
             .get(&snap.torrent_info_hash)
             .map_or(0, crate::bandwidth::Speed::bytes_per_second);
         global_bps = global_bps.saturating_add(current_speed_bps);
         global_dl_bps = global_dl_bps.saturating_add(current_download_speed_bps);
-        let stats = deps
-            .bandwidth
-            .get_seed_stat_for_torrent(&snap.torrent_info_hash);
+        let stats = bandwidth
+            .stats
+            .get(&snap.torrent_info_hash)
+            .copied()
+            .unwrap_or_default();
         let initial_completed = deps
             .state_store
             .is_initial_completed(&snap.torrent_info_hash);

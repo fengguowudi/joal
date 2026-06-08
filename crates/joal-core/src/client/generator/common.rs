@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use rand::Rng;
 use rand_regex::Regex as RandRegex;
 use regex_syntax::ParserBuilder;
 
@@ -31,6 +32,18 @@ pub(super) fn compile_rand_regex(pattern: &str) -> Result<RandRegex, ClientError
         .parse(&prepared)
         .map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))?;
     RandRegex::with_hir(hir, 100).map_err(|e| ClientError::InvalidRegex(format!("{pattern}: {e}")))
+}
+
+/// Sample raw peer-id/key bytes from a compiled `.client` regex pattern.
+/// Shared by the REGEX peer-id and key algorithms, which differ only in the
+/// surrounding trait family.
+pub(super) fn sample_rand_regex<R: Rng + ?Sized>(
+    pattern: &str,
+    rng: &mut R,
+) -> Result<Vec<u8>, ClientError> {
+    let generator = compile_rand_regex(pattern)?;
+    let bytes: Vec<u8> = rng.sample(&generator);
+    Ok(bytes)
 }
 
 /// Rewrite codepoints `0x80..=0xFF` as `\xHH` escapes so the byte-mode parser

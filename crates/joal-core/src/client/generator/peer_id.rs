@@ -51,9 +51,7 @@ impl RegexPeerIdAlgorithm {
     }
 
     fn generate_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<Vec<u8>, ClientError> {
-        let generator = compile_rand_regex(&self.pattern)?;
-        let bytes: Vec<u8> = rng.sample(&generator);
-        Ok(bytes)
+        super::common::sample_rand_regex(&self.pattern, rng)
     }
 }
 

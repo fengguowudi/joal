@@ -3,15 +3,15 @@
 //! Port of Java
 //! `org.araymond.joal.core.ttorrent.client.announcer.request.AnnouncerExecutor`.
 //! Where Java uses a bounded `ThreadPoolExecutor`, the Rust side uses
-//! [`tokio::spawn`] and tracks running tasks in a [`Mutex`]-guarded map
-//! keyed on [`InfoHash`]. There is no explicit pool size — tokio's work-
-//! stealing runtime scales announce tasks across all worker threads
-//! naturally.
+//! [`tokio::spawn`], tracks running tasks in a [`Mutex`]-guarded map
+//! keyed on [`InfoHash`], and gates the actual HTTP announce section through
+//! a global semaphore so tracker bursts cannot consume unbounded resources.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -23,6 +23,11 @@ use crate::torrent::InfoHash;
 
 /// Matches Java's `awaitTermination(10, SECONDS)` for outstanding announces.
 pub const AWAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Global cap for concurrent tracker announces. The executor may have more
+/// queued tokio tasks than this when many torrents become ready at once, but no
+/// more than this number can enter `Announcer::announce` concurrently.
+pub const MAX_CONCURRENT_ANNOUNCES: usize = 8;
 
 /// Response callback trait. Implementations are the glue between the
 /// executor and the `AnnounceResponseHandlerChain`. Mirrors Java
@@ -42,6 +47,7 @@ pub struct AnnouncerExecutor {
     callback: Arc<dyn AnnounceResponseCallback>,
     control: Arc<dyn OrchestratorControl>,
     running: Arc<Mutex<HashMap<InfoHash, RunningTask>>>,
+    permits: Arc<Semaphore>,
 }
 
 /// Strategy used to look up the [`Announcer`] for a given request and
@@ -68,10 +74,21 @@ impl AnnouncerExecutor {
         callback: Arc<dyn AnnounceResponseCallback>,
         control: Arc<dyn OrchestratorControl>,
     ) -> Self {
+        Self::with_max_concurrency(callback, control, MAX_CONCURRENT_ANNOUNCES)
+    }
+
+    #[must_use]
+    pub fn with_max_concurrency(
+        callback: Arc<dyn AnnounceResponseCallback>,
+        control: Arc<dyn OrchestratorControl>,
+        max_concurrency: usize,
+    ) -> Self {
+        let max_concurrency = max_concurrency.max(1);
         Self {
             callback,
             control,
             running: Arc::new(Mutex::new(HashMap::new())),
+            permits: Arc::new(Semaphore::new(max_concurrency)),
         }
     }
 
@@ -94,8 +111,12 @@ impl AnnouncerExecutor {
         let callback = Arc::clone(&self.callback);
         let announcer_task = Arc::clone(&announcer);
         let running = Arc::clone(&self.running);
+        let permits = Arc::clone(&self.permits);
         let key = info_hash.clone();
         let handle = tokio::spawn(async move {
+            let Ok(_permit) = permits.acquire_owned().await else {
+                return;
+            };
             callback.on_will_announce(event, &announcer_task);
             let outcome = match announcer_task.announce(event).await {
                 Ok(result) => AnnounceOutcome::Success(result),

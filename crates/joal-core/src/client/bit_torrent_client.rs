@@ -19,6 +19,7 @@
 //! JVM we have nothing more specific to report, and `.client` templates use
 //! this only inside `User-Agent`-style strings where any stable value works.
 
+use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 
@@ -44,6 +45,8 @@ pub struct BitTorrentClient {
     url_encoder: UrlEncoder,
     numwant_provider: NumwantProvider,
     query: String,
+    query_template: Vec<QueryPairTemplate>,
+    requires_key: bool,
     headers: Vec<(String, String)>,
 }
 
@@ -76,6 +79,8 @@ impl BitTorrentClient {
 
         let numwant_provider = NumwantProvider::new(numwant, numwant_on_stop)?;
         let query = collapse_ampersands(&query);
+        let query_template = parse_query_template(&query);
+        let requires_key = query.contains("{key}");
         let headers = resolve_request_headers(&request_headers)?;
 
         Ok(Self {
@@ -84,6 +89,8 @@ impl BitTorrentClient {
             url_encoder,
             numwant_provider,
             query,
+            query_template,
+            requires_key,
             headers,
         })
     }
@@ -143,20 +150,89 @@ impl BitTorrentClient {
         stats: &TorrentSeedStats,
         connection: &ConnectionHandler,
     ) -> Result<String, ClientError> {
-        let info_hash_encoded = self.url_encoder.encode_bytes(info_hash.as_bytes())?;
-        let mut q = infohash_regex()
-            .replace_all(&self.query, regex::NoExpand(&info_hash_encoded))
-            .into_owned();
+        let values = QueryValues::new(self, event, info_hash, stats, connection)?;
+        let mut out = String::with_capacity(self.query.len() + 32);
+        for pair in &self.query_template {
+            if !pair.should_emit(&values) {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push('&');
+            }
+            pair.render(&values, &mut out)?;
+        }
 
-        q = replace_literal(&q, &UPLOADED_PTRN, &stats.uploaded().to_string());
-        q = replace_literal(&q, &DOWNLOADED_PTRN, &stats.downloaded().to_string());
-        q = replace_literal(&q, &LEFT_PTRN, &stats.left().to_string());
-        q = replace_literal(&q, &PORT_PTRN, &connection.port().to_string());
-        q = replace_literal(&q, &NUMWANT_PTRN, &self.numwant(event).to_string());
+        if let Some(m) = placeholder_regex().find(&out) {
+            return Err(ClientError::Integrity(format!(
+                "Placeholder [{}] were not recognized while building announce URL",
+                m.as_str()
+            )));
+        }
 
-        let peer_id_raw = self.peer_id(info_hash, event)?;
-        let peer_id = if self.peer_id_generator.config().should_url_encode() {
-            self.url_encoder.encode_bytes(&peer_id_raw)?
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QueryPairTemplate {
+    segments: Vec<QuerySegment>,
+    skip_when_event_none: bool,
+    ip_family: IpPairFamily,
+}
+
+#[derive(Debug, Clone)]
+enum QuerySegment {
+    Literal(String),
+    Placeholder(QueryPlaceholder),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryPlaceholder {
+    InfoHash,
+    Uploaded,
+    Downloaded,
+    Left,
+    Port,
+    Numwant,
+    PeerId,
+    Event,
+    Key,
+    Ip,
+    Ipv6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpPairFamily {
+    None,
+    V4,
+    V6,
+}
+
+struct QueryValues {
+    info_hash: String,
+    uploaded: u64,
+    downloaded: u64,
+    left: u64,
+    port: u16,
+    numwant: i32,
+    peer_id: String,
+    event: RequestEvent,
+    key: Option<String>,
+    ip: Option<String>,
+    ipv6: Option<String>,
+}
+
+impl QueryValues {
+    fn new(
+        client: &BitTorrentClient,
+        event: RequestEvent,
+        info_hash: &InfoHash,
+        stats: &TorrentSeedStats,
+        connection: &ConnectionHandler,
+    ) -> Result<Self, ClientError> {
+        let peer_id_raw = client.peer_id(info_hash, event)?;
+        let peer_id = if client.peer_id_generator.config().should_url_encode() {
+            client.url_encoder.encode_bytes(&peer_id_raw)?
         } else {
             // `should_url_encode = false` is only safe for ASCII-only peer-id
             // patterns; the bundled clients honor this, but a future config
@@ -167,50 +243,173 @@ impl BitTorrentClient {
                     "peer_id contains non-ASCII bytes but shouldUrlEncode is false".to_owned(),
                 ));
             }
-            String::from_utf8(peer_id_raw)
-                .expect("non-ASCII bytes rejected above; remaining bytes are valid UTF-8")
+            String::from_utf8(peer_id_raw).map_err(|error| {
+                ClientError::Integrity(format!(
+                    "peer_id bytes were ASCII but not valid UTF-8: {error}"
+                ))
+            })?
         };
-        q = replace_literal(&q, &PEER_ID_PTRN, &peer_id);
 
-        match connection.ip_address() {
-            Some(IpAddr::V4(v4)) if q.contains("{ip}") => {
-                q = replace_literal(&q, &IP_PTRN, &v4.to_string());
-            }
-            Some(IpAddr::V6(v6)) if q.contains("{ipv6}") => {
-                let encoded = self.url_encoder.encode(&v6.to_string())?;
-                q = replace_literal(&q, &IPV6_PTRN, &encoded);
-            }
-            _ => {}
-        }
-        // Remove any leftover `&key={ip}` / `&key={ipv6}` pairs whose host
-        // family did not match; same as Java's `IP_Q_PTRN` sweep.
-        q = ip_qpair_regex().replace_all(&q, "").into_owned();
-
-        if event == RequestEvent::None {
-            q = event_qpair_regex().replace_all(&q, "").into_owned();
-        } else {
-            q = replace_literal(&q, &EVENT_PTRN, event.event_name());
-        }
-
-        if q.contains("{key}") {
-            let key = self.key(info_hash, event)?.ok_or_else(|| {
+        let key = if client.requires_key {
+            let raw = client.key(info_hash, event)?.ok_or_else(|| {
                 ClientError::Integrity(
                     "Client request query contains 'key' but BitTorrentClient does not have a key"
                         .to_owned(),
                 )
             })?;
-            let encoded = self.url_encoder.encode_bytes(&key)?;
-            q = replace_literal(&q, &KEY_PTRN, &encoded);
-        }
+            Some(client.url_encoder.encode_bytes(&raw)?)
+        } else {
+            None
+        };
 
-        if let Some(m) = placeholder_regex().find(&q) {
-            return Err(ClientError::Integrity(format!(
-                "Placeholder [{}] were not recognized while building announce URL",
-                m.as_str()
-            )));
-        }
+        let (ip, ipv6) = match connection.ip_address() {
+            Some(IpAddr::V4(v4)) => (Some(v4.to_string()), None),
+            Some(IpAddr::V6(v6)) => (None, Some(client.url_encoder.encode(&v6.to_string())?)),
+            None => (None, None),
+        };
 
-        Ok(trim_ampersands(&collapse_ampersands(&q)).to_owned())
+        Ok(Self {
+            info_hash: client.url_encoder.encode_bytes(info_hash.as_bytes())?,
+            uploaded: stats.uploaded(),
+            downloaded: stats.downloaded(),
+            left: stats.left(),
+            port: connection.port(),
+            numwant: client.numwant(event),
+            peer_id,
+            event,
+            key,
+            ip,
+            ipv6,
+        })
+    }
+}
+
+impl QueryPairTemplate {
+    fn should_emit(&self, values: &QueryValues) -> bool {
+        if self.skip_when_event_none && values.event == RequestEvent::None {
+            return false;
+        }
+        match self.ip_family {
+            IpPairFamily::None => true,
+            IpPairFamily::V4 => values.ip.is_some(),
+            IpPairFamily::V6 => values.ipv6.is_some(),
+        }
+    }
+
+    fn render(&self, values: &QueryValues, out: &mut String) -> Result<(), ClientError> {
+        for segment in &self.segments {
+            match segment {
+                QuerySegment::Literal(literal) => out.push_str(literal),
+                QuerySegment::Placeholder(placeholder) => placeholder.render(values, out)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl QueryPlaceholder {
+    fn render(self, values: &QueryValues, out: &mut String) -> Result<(), ClientError> {
+        match self {
+            Self::InfoHash => out.push_str(&values.info_hash),
+            Self::Uploaded => {
+                let _ = write!(out, "{}", values.uploaded);
+            }
+            Self::Downloaded => {
+                let _ = write!(out, "{}", values.downloaded);
+            }
+            Self::Left => {
+                let _ = write!(out, "{}", values.left);
+            }
+            Self::Port => {
+                let _ = write!(out, "{}", values.port);
+            }
+            Self::Numwant => {
+                let _ = write!(out, "{}", values.numwant);
+            }
+            Self::PeerId => out.push_str(&values.peer_id),
+            Self::Event => out.push_str(values.event.event_name()),
+            Self::Key => out.push_str(values.key.as_deref().ok_or_else(|| {
+                ClientError::Integrity(
+                    "Client request query contains 'key' but BitTorrentClient does not have a key"
+                        .to_owned(),
+                )
+            })?),
+            Self::Ip => out.push_str(values.ip.as_deref().unwrap_or("{ip}")),
+            Self::Ipv6 => out.push_str(values.ipv6.as_deref().unwrap_or("{ipv6}")),
+        }
+        Ok(())
+    }
+}
+
+fn parse_query_template(query: &str) -> Vec<QueryPairTemplate> {
+    trim_ampersands(query)
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(parse_query_pair_template)
+        .collect()
+}
+
+fn parse_query_pair_template(pair: &str) -> QueryPairTemplate {
+    let mut segments = Vec::new();
+    let mut rest = pair;
+    while let Some(start) = rest.find('{') {
+        if start > 0 {
+            segments.push(QuerySegment::Literal(rest[..start].to_owned()));
+        }
+        let after_start = &rest[start..];
+        if let Some(end) = after_start.find('}') {
+            let placeholder_text = &after_start[..=end];
+            if let Some(placeholder) = known_placeholder(placeholder_text) {
+                segments.push(QuerySegment::Placeholder(placeholder));
+            } else {
+                segments.push(QuerySegment::Literal(placeholder_text.to_owned()));
+            }
+            rest = &after_start[end + 1..];
+        } else {
+            segments.push(QuerySegment::Literal(after_start.to_owned()));
+            rest = "";
+        }
+    }
+    if !rest.is_empty() {
+        segments.push(QuerySegment::Literal(rest.to_owned()));
+    }
+    let skip_when_event_none = segments
+        .iter()
+        .any(|segment| matches!(segment, QuerySegment::Placeholder(QueryPlaceholder::Event)));
+    let ip_family = if segments
+        .iter()
+        .any(|segment| matches!(segment, QuerySegment::Placeholder(QueryPlaceholder::Ipv6)))
+    {
+        IpPairFamily::V6
+    } else if segments
+        .iter()
+        .any(|segment| matches!(segment, QuerySegment::Placeholder(QueryPlaceholder::Ip)))
+    {
+        IpPairFamily::V4
+    } else {
+        IpPairFamily::None
+    };
+    QueryPairTemplate {
+        segments,
+        skip_when_event_none,
+        ip_family,
+    }
+}
+
+fn known_placeholder(text: &str) -> Option<QueryPlaceholder> {
+    match text {
+        "{infohash}" => Some(QueryPlaceholder::InfoHash),
+        "{uploaded}" => Some(QueryPlaceholder::Uploaded),
+        "{downloaded}" => Some(QueryPlaceholder::Downloaded),
+        "{left}" => Some(QueryPlaceholder::Left),
+        "{port}" => Some(QueryPlaceholder::Port),
+        "{numwant}" => Some(QueryPlaceholder::Numwant),
+        "{peerid}" => Some(QueryPlaceholder::PeerId),
+        "{event}" => Some(QueryPlaceholder::Event),
+        "{key}" => Some(QueryPlaceholder::Key),
+        "{ip}" => Some(QueryPlaceholder::Ip),
+        "{ipv6}" => Some(QueryPlaceholder::Ipv6),
+        _ => None,
     }
 }
 
@@ -288,36 +487,14 @@ impl std::ops::Deref for LazyRegex {
     }
 }
 
-cached_regex!(INFOHASH_PTRN, r"\{infohash\}");
-cached_regex!(UPLOADED_PTRN, r"\{uploaded\}");
-cached_regex!(DOWNLOADED_PTRN, r"\{downloaded\}");
-cached_regex!(LEFT_PTRN, r"\{left\}");
-cached_regex!(PORT_PTRN, r"\{port\}");
-cached_regex!(NUMWANT_PTRN, r"\{numwant\}");
-cached_regex!(PEER_ID_PTRN, r"\{peerid\}");
-cached_regex!(EVENT_PTRN, r"\{event\}");
-cached_regex!(KEY_PTRN, r"\{key\}");
 cached_regex!(JAVA_PTRN, r"\{java\}");
 cached_regex!(OS_PTRN, r"\{os\}");
 cached_regex!(LOCALE_PTRN, r"\{locale\}");
-cached_regex!(IP_PTRN, r"\{ip\}");
-cached_regex!(IPV6_PTRN, r"\{ipv6\}");
 cached_regex!(AMPERSAND_DUPES_PTRN, r"&{2,}");
-cached_regex!(IP_QPAIR_PTRN, r"&*\w+=\{ip(?:v6)?\}");
-cached_regex!(EVENT_QPAIR_PTRN, r"&*\w+=\{event\}");
 cached_regex!(PLACEHOLDER_PTRN, r"\{[^}]*\}");
 
-fn infohash_regex() -> &'static Regex {
-    &INFOHASH_PTRN
-}
 fn ampersand_dupes_regex() -> &'static Regex {
     &AMPERSAND_DUPES_PTRN
-}
-fn ip_qpair_regex() -> &'static Regex {
-    &IP_QPAIR_PTRN
-}
-fn event_qpair_regex() -> &'static Regex {
-    &EVENT_QPAIR_PTRN
 }
 fn placeholder_regex() -> &'static Regex {
     &PLACEHOLDER_PTRN
