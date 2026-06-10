@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod command;
 mod ui;
 
@@ -35,32 +37,120 @@ fn resolve_joal_conf(arg: Option<PathBuf>) -> PathBuf {
 }
 
 fn configure_cjk_fonts(ctx: &egui::Context) {
-    let font_path = std::path::Path::new("C:\\Windows\\Fonts\\msyh.ttc");
+    let candidates = [
+        // Linux — Noto Sans CJK
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        // Linux — WenQuanYi
+        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        // macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        // Windows
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+    ];
+
+    let font_path = candidates.iter().find(|p| std::path::Path::new(p).exists());
+    let Some(font_path) = font_path else { return };
+
     if let Ok(font_data) = std::fs::read(font_path) {
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
-            "msyh".to_owned(),
+            "cjk".to_owned(),
             Arc::new(egui::FontData::from_owned(font_data)),
         );
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
             .or_default()
-            .insert(0, "msyh".to_owned());
+            .insert(0, "cjk".to_owned());
         fonts
             .families
             .entry(egui::FontFamily::Monospace)
             .or_default()
-            .push("msyh".to_owned());
+            .push("cjk".to_owned());
         ctx.set_fonts(fonts);
     }
 }
 
 fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use std::fs;
+    use std::time::SystemTime;
+    use tracing_subscriber::{EnvFilter, fmt, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,joal_core=debug,joal_app=debug"));
-    fmt().with_env_filter(filter).with_target(true).init();
+
+    // Create logs directory if it doesn't exist
+    let logs_dir = std::path::Path::new("logs");
+    if !logs_dir.exists() {
+        let _ = fs::create_dir_all(logs_dir);
+    }
+
+    // Create log file with unique timestamp name
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let log_file = fs::File::create(logs_dir.join(format!("{timestamp}.log")))
+        .expect("Failed to create log file");
+
+    // Initialize the log channel for UI
+    ui::init_log_channel();
+
+    // Console layer (hidden by windows_subsystem = "windows" attribute)
+    let console_layer = fmt::layer()
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .with_filter(filter.clone());
+
+    // File layer
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(log_file)
+        .with_filter(filter.clone());
+
+    // UI layer - sends logs to the global channel
+    let sender = ui::get_log_sender().expect("Log channel not initialized");
+    let ui_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(move || {
+            // Create a writer that sends logs to the channel
+            ChannelWriter {
+                sender: sender.clone(),
+            }
+        })
+        .with_filter(filter);
+
+    // Initialize the subscriber
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
+        .with(ui_layer)
+        .init();
+}
+
+/// Custom writer that sends log messages to a channel
+struct ChannelWriter {
+    sender: std::sync::mpsc::Sender<String>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(msg) = String::from_utf8(buf.to_vec()) {
+            let _ = self.sender.send(msg);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
