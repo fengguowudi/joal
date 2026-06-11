@@ -10,15 +10,46 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: joal-windows-x86_64
+            binary_name: joal-desktop.exe
+            archive_ext: .zip
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: joal-linux-x86_64
+            binary_name: joal-desktop
+            archive_ext: .tar.gz
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: joal-macos-x86_64
+            binary_name: joal-desktop
+            archive_ext: .tar.gz
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: joal-macos-aarch64
+            binary_name: joal-desktop
+            archive_ext: .tar.gz
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libwayland-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -27,25 +58,34 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: x86_64-pc-windows-msvc-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: x86_64-pc-windows-msvc-cargo-
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Build release binary
-        run: cargo build --release --target x86_64-pc-windows-msvc -p joal-app
+        run: cargo build --release --target ${{ matrix.target }} -p joal-app
 
-      - name: Package
+      - name: Package (zip)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target/x86_64-pc-windows-msvc/release/joal-desktop.exe" staging/
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/
           Copy-Item -Recurse resources staging/
-          Compress-Archive -Path staging/* -DestinationPath "joal-windows-x86_64.zip"
+          Compress-Archive -Path staging/* -DestinationPath "${{ matrix.artifact_name }}${{ matrix.archive_ext }}"
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/
+          cp -r resources staging/
+          tar czf "${{ matrix.artifact_name }}${{ matrix.archive_ext }}" -C staging .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: joal-windows-x86_64
-          path: joal-windows-x86_64.zip
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}${{ matrix.archive_ext }}
 
   release:
     needs: build
@@ -63,3 +103,6 @@ jobs:
           generate_release_notes: true
           files: |
             joal-windows-x86_64.zip
+            joal-linux-x86_64.tar.gz
+            joal-macos-x86_64.tar.gz
+            joal-macos-aarch64.tar.gz
