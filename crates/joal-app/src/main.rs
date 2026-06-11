@@ -79,7 +79,9 @@ fn configure_cjk_fonts(ctx: &egui::Context) {
 fn init_tracing() {
     use std::fs;
     use std::time::SystemTime;
-    use tracing_subscriber::{EnvFilter, fmt, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::{
+        EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+    };
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,joal_core=debug,joal_app=debug"));

@@ -20,28 +20,33 @@ fn main() {
     let dst = profile_dir.join("resources");
 
     copy_dir(&src, &dst).unwrap_or_else(|e| {
-        panic!("Failed to copy resources from {:?} to {:?}: {}", src, dst, e);
+        panic!(
+            "Failed to copy resources from {} to {}: {e}",
+            src.display(),
+            dst.display()
+        );
     });
 
     let config_json = dst.join("config.json");
     let config_example = dst.join("config.example.json");
     if !config_json.exists() && config_example.exists() {
         fs::copy(&config_example, &config_json).unwrap_or_else(|e| {
-            panic!("Failed to create config.json from example: {}", e);
+            panic!("Failed to create config.json from example: {e}");
         });
         println!("cargo:warning=Created config.json from config.example.json");
     }
 
     // JOAL_CLIENT env var overrides the client in config.json at build time
     // Usage: JOAL_CLIENT=qbittorrent-5.2.1.client cargo run
-    if let Ok(client) = env::var("JOAL_CLIENT") {
-        if !client.is_empty() && config_json.exists() {
-            let content = fs::read_to_string(&config_json).unwrap();
-            if let Ok(mut json) = content.parse::<serde_json::Value>() {
-                json["client"] = serde_json::Value::String(client.clone());
-                fs::write(&config_json, serde_json::to_string_pretty(&json).unwrap()).unwrap();
-                println!("cargo:warning=JOAL_CLIENT overridden to: {}", client);
-            }
+    if let Ok(client) = env::var("JOAL_CLIENT")
+        && !client.is_empty()
+        && config_json.exists()
+    {
+        let content = fs::read_to_string(&config_json).unwrap();
+        if let Ok(mut json) = content.parse::<serde_json::Value>() {
+            json["client"] = serde_json::Value::String(client.clone());
+            fs::write(&config_json, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+            println!("cargo:warning=JOAL_CLIENT overridden to: {client}");
         }
     }
 
