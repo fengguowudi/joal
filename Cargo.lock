@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "joal-app"
-version = "2.2.5"
+version = "2.2.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "joal-core"
-version = "2.2.5"
+version = "2.2.6"
 dependencies = [
  "anyhow",
  "notify",
