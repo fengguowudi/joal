@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use joal_core::snapshot::TorrentStatus;
 
-use super::super::i18n::Tr;
+use super::i18n::Tr;
 
 pub(super) fn short_hash(torrent: &TorrentStatus) -> String {
     let hash = torrent.info_hash.to_string();
@@ -50,8 +50,26 @@ pub(super) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub(super) fn opt_u32(val: Option<u32>) -> String {
-    val.map_or_else(|| "\u{2014}".to_owned(), |v| v.to_string())
+pub(super) fn format_speed(bytes_per_sec: u64) -> String {
+    if bytes_per_sec >= 1_048_576 {
+        format!("{:.1} MB/s", bytes_per_sec as f64 / 1_048_576.0)
+    } else if bytes_per_sec >= 1024 {
+        format!("{:.1} KB/s", bytes_per_sec as f64 / 1024.0)
+    } else {
+        format!("{bytes_per_sec} B/s")
+    }
+}
+
+pub(super) fn format_speed_kb(kilobytes_per_sec: f64) -> String {
+    if kilobytes_per_sec.abs() >= 1024.0 {
+        format!("{:.1} MB/s", kilobytes_per_sec / 1024.0)
+    } else {
+        format!("{kilobytes_per_sec:.1} KB/s")
+    }
+}
+
+pub(super) fn opt_u32(value: Option<u32>) -> String {
+    value.map_or_else(|| "—".to_owned(), |value| value.to_string())
 }
 
 pub(super) fn progress_fraction(torrent: &TorrentStatus) -> f64 {

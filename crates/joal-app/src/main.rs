@@ -1,21 +1,18 @@
 #![windows_subsystem = "windows"]
 
-mod command;
+mod engine;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use clap::Parser;
-use command::command_handler;
-use joal_core::seed_manager::SeedManager;
+use joal_core::config::JoalFolders;
 use tokio::runtime::Runtime;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::oneshot;
 use tracing::{info, warn};
-
-pub use command::{EngineCommand, EngineResponse};
 
 /// JOAL desktop — BitTorrent seeding client simulator.
 #[derive(Debug, Parser)]
@@ -29,178 +26,186 @@ struct Args {
 }
 
 fn resolve_joal_conf(arg: Option<PathBuf>) -> PathBuf {
-    if let Some(p) = arg {
-        return p;
+    if let Some(path) = arg {
+        return path;
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     exe.parent().unwrap_or(exe.as_ref()).join("resources")
 }
 
-fn configure_cjk_fonts(ctx: &egui::Context) {
-    let candidates = [
-        // Linux — Noto Sans CJK
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        // Linux — WenQuanYi
-        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        // macOS
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        // Windows
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\msyhbd.ttc",
-    ];
-
-    let font_path = candidates.iter().find(|p| std::path::Path::new(p).exists());
-    let Some(font_path) = font_path else { return };
-
-    if let Ok(font_data) = std::fs::read(font_path) {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "cjk".to_owned(),
-            Arc::new(egui::FontData::from_owned(font_data)),
-        );
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "cjk".to_owned());
-        fonts
-            .families
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .push("cjk".to_owned());
-        ctx.set_fonts(fonts);
-    }
+fn logs_dir_for(joal_conf: &Path) -> PathBuf {
+    joal_conf.parent().unwrap_or(joal_conf).join("logs")
 }
 
-fn init_tracing() {
+fn configure_cjk_fonts(ctx: &egui::Context) {
+    let mut candidates = vec![
+        PathBuf::from("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        PathBuf::from("/usr/share/fonts/wqy-microhei/wqy-microhei.ttc"),
+        PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        PathBuf::from("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        PathBuf::from("/System/Library/Fonts/PingFang.ttc"),
+        PathBuf::from("/System/Library/Fonts/STHeiti Light.ttc"),
+    ];
+    if let Some(windows_dir) = std::env::var_os("WINDIR") {
+        let fonts = PathBuf::from(windows_dir).join("Fonts");
+        for name in ["msyh.ttc", "msyh.ttf", "simhei.ttf", "simsun.ttc"] {
+            candidates.push(fonts.join(name));
+        }
+    }
+
+    let Some(font_path) = candidates.iter().find(|path| path.is_file()) else {
+        return;
+    };
+    let Ok(font_data) = std::fs::read(font_path) else {
+        warn!(path = %font_path.display(), "failed to read CJK font");
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "cjk".to_owned(),
+        Arc::new(egui::FontData::from_owned(font_data)),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "cjk".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("cjk".to_owned());
+    ctx.set_fonts(fonts);
+}
+
+fn init_tracing(logs_dir: &Path) {
     use std::fs;
-    use std::time::SystemTime;
     use tracing_subscriber::{
         EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt,
     };
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,joal_core=debug,joal_app=debug"));
-
-    // Create logs directory if it doesn't exist
-    let logs_dir = std::path::Path::new("logs");
-    if !logs_dir.exists() {
-        let _ = fs::create_dir_all(logs_dir);
-    }
-
-    // Create log file with unique timestamp name
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let log_file = fs::File::create(logs_dir.join(format!("{timestamp}.log")))
-        .expect("Failed to create log file");
-
-    // Console layer (hidden by windows_subsystem = "windows" attribute)
+    let file_layer = fs::create_dir_all(logs_dir)
+        .and_then(|()| fs::File::create(logs_dir.join(format!("{timestamp}.log"))))
+        .map_err(|error| {
+            warn!(%error, directory = %logs_dir.display(), "file logging disabled");
+            error
+        })
+        .ok()
+        .map(|file| {
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(file)
+                .with_filter(filter.clone())
+        });
     let console_layer = fmt::layer()
         .with_target(true)
         .with_writer(std::io::stderr)
-        .with_filter(filter.clone());
+        .with_filter(filter);
 
-    // File layer
-    let file_layer = fmt::layer()
-        .with_target(true)
-        .with_ansi(false)
-        .with_writer(log_file)
-        .with_filter(filter.clone());
-
-    // Initialize the subscriber
     tracing_subscriber::registry()
         .with(console_layer)
         .with(file_layer)
         .init();
+    prune_logs(logs_dir, 10);
+}
+
+fn prune_logs(logs_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(logs_dir) else {
+        return;
+    };
+    let mut logs = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .collect::<Vec<_>>();
+    logs.sort();
+    let remove_count = logs.len().saturating_sub(keep);
+    for path in logs.into_iter().take(remove_count) {
+        if let Err(error) = std::fs::remove_file(&path) {
+            warn!(%error, path = %path.display(), "failed to remove old log");
+        }
+    }
 }
 
 fn main() -> Result<()> {
-    init_tracing();
     let args = Args::parse();
     let joal_conf = resolve_joal_conf(args.joal_conf);
+    init_tracing(&logs_dir_for(&joal_conf));
     info!(
         target: "joal_app::boot",
         joal_conf = %joal_conf.display(),
-        "joal-desktop starting (egui mode)",
+        "joal-desktop starting (egui mode)"
     );
 
-    let rt = Runtime::new()?;
-    let seed_manager = rt.block_on(SeedManager::start(&joal_conf))?;
-
-    let snapshot_rx = seed_manager.snapshot_watch();
-    let events_rx = seed_manager.subscribe_events();
-    let folders = seed_manager.folders().clone();
-    let started_at = Instant::now();
-
-    // Command channel: UI -> tokio runtime
-    let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(32);
-    // Response channel: tokio runtime -> UI
-    let (resp_tx, resp_rx) = mpsc::channel::<EngineResponse>(32);
-
-    let folders_arc = Arc::new(folders);
-
-    // Share the SeedManager with the command handler
-    let shared_sm = Arc::new(Mutex::new(Some(seed_manager)));
-
-    // Spawn the command handler on the tokio runtime
-    let cmd_folders = folders_arc.clone();
-    let cmd_sm = shared_sm.clone();
-    let joal_conf_for_cmd = joal_conf;
-    rt.spawn(command_handler(
-        cmd_rx,
-        resp_tx,
-        cmd_folders,
-        cmd_sm,
-        joal_conf_for_cmd,
-    ));
-
-    let app = ui::JoalApp::new(
-        snapshot_rx,
-        events_rx,
-        started_at,
-        cmd_tx,
-        resp_rx,
-        folders_arc,
-    );
-
+    let runtime = Runtime::new()?;
+    let repaint = engine::Repaint::default();
+    let (link, shutdown_tx) = engine::spawn(runtime.handle(), joal_conf.clone(), repaint.clone());
+    let folders = JoalFolders::new(&joal_conf);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JOAL Desktop")
-            // 1180x740 keeps the torrent table comfortable on a fresh install
-            // (all 11 columns visible without horizontal scroll at their
-            // post-narrowing widths) without feeling oversized on a 1366x768
-            // laptop. The 960x600 floor still keeps the action cluster from
-            // wrapping on 13" panels.
             .with_inner_size([1180.0, 740.0])
             .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };
 
-    if let Err(e) = eframe::run_native(
+    let creator_repaint = repaint.clone();
+    if let Err(error) = eframe::run_native(
         "JOAL Desktop",
         native_options,
         Box::new(move |cc| {
+            creator_repaint.set(cc.egui_ctx.clone());
             configure_cjk_fonts(&cc.egui_ctx);
             ui::configure_visuals(&cc.egui_ctx);
-            Ok(Box::new(app))
+            Ok(Box::new(ui::JoalApp::new(link, &folders, cc.storage)))
         }),
     ) {
-        warn!(target: "joal_app::boot", error = %e, "eframe exited with error");
+        warn!(target: "joal_app::boot", %error, "eframe exited with error");
     }
 
     info!(target: "joal_app::boot", "window closed, shutting down engine");
-    rt.block_on(async {
-        let mut guard = shared_sm.lock().await;
-        if let Some(sm) = guard.as_mut() {
-            sm.stop().await;
+    runtime.block_on(async {
+        let (done_tx, done_rx) = oneshot::channel();
+        let shutdown = async {
+            if shutdown_tx
+                .send(engine::EngineCommand::Shutdown(done_tx))
+                .await
+                .is_ok()
+            {
+                let _ = done_rx.await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(15), shutdown)
+            .await
+            .is_err()
+        {
+            warn!(target: "joal_app::boot", "engine shutdown timed out");
         }
     });
     info!(target: "joal_app::boot", "joal-desktop stopped cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_live_next_to_configuration_parent() {
+        assert_eq!(
+            logs_dir_for(Path::new("/tmp/joal/resources")),
+            PathBuf::from("/tmp/joal/logs")
+        );
+    }
 }

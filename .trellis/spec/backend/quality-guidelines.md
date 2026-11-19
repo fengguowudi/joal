@@ -267,7 +267,7 @@ pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: impl ToStri
     ui.push_id(id, |ui| {                              // outer slot id
         Frame::new()
             .fill(colors.bg)
-            .stroke(Stroke::new(1.0, colors.stroke))
+            .stroke(Stroke::NONE)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if !label.is_empty() {
@@ -378,14 +378,15 @@ egui::ComboBox::from_id_salt("client_combo")
 - Future contributors will reflexively reach for `Stroke::new(1.0, ...)` to "improve separation". This regresses the entire visual system and should be caught in review.
 
 **Fix (convention)**:
-- All `Frame` helpers in `crates/joal-app/src/ui/theme.rs` (`panel_frame`, `inset_frame`, `tone_frame`, `badge`, `metric`) MUST use `Stroke::NONE`. Do not add `.stroke(Stroke::new(...))` to any new frame helper in this crate.
-- Every `Tone` in `tone_colors(...)` keeps `stroke: Color32::TRANSPARENT`. The stroke field stays in `ToneColors` so callers can still type the struct, but its value must remain transparent.
+- All `Frame` helpers in `crates/joal-app/src/ui/theme.rs` (`panel_frame`, `inset_frame`, `tone_frame`, `badge`) MUST use `Stroke::NONE`. Do not add `.stroke(Stroke::new(...))` to any new frame helper in this crate.
+- `ToneColors` contains only `fg` and `bg`; its old `stroke` field has been removed. The 2px blue keyboard focus ring is the deliberate accessibility exception to the fills-only rule and is drawn by `theme::focus_ring`, not by container frames.
 - Corner radii are quantised to three values via the module constants `CR_BADGE = 4`, `CR_INSET = 6`, `CR_PANEL = 8`. Don't introduce new radii (the pre-rewrite code mixed 5 and 8 — don't go back). Use `CR_BADGE` for pills/chips, `CR_INSET` for inset surfaces / default widgets / `metric`-style cards, `CR_PANEL` for the outer cards that frame whole sections. Divider strips and edge-to-edge background bars (e.g. `theme::strip_frame`) use `CornerRadius::ZERO` directly — these are not cards, so they don't belong on the `CR_*` scale. The constants are reserved for surfaces that visually act as containers; `ZERO` is the explicit absence of rounding, not a fourth value on the scale.
 - Text uses a strict three-tier gray hierarchy from `theme.rs`:
   - `text_primary()` (`#111827`, near-black) — names, numbers, percentages, anything the operator scans for.
-  - `text_secondary()` (`#6B7280`, mid-gray) — column headers, body copy, badge captions, secondary speeds.
-  - `text_tertiary()` (`#9CA3AF`, light-gray) — timestamps, client filenames, log lines, "last announced" hints. Anything the operator should not focus on.
-- Do not hard-code `Color32::BLACK` / `Color32::GRAY` / `Color32::from_rgb(...)` for text. Always go through the three accessors so theme tweaks stay centralised.
+  - `text_secondary()` (`#475569`, mid-gray) — column headers, body copy, log text, secondary speeds.
+  - `text_tertiary()` (`#64748B`, slate-500) — timestamps and auxiliary metadata on white surfaces; do not use it on `app_background`.
+- Font sizes are explicit: `Small = 12`, `Body = 14`, `Button = 14`, `Heading = 18`, `Monospace = 13`. Do not rely on egui's 9px `Small` default for CJK text.
+- Tone foregrounds use accessible values: `Success = #15803D`, `Warning = #B45309`, `Danger = #B91C1C`; `Accent` and `Info` retain their existing accessible values.
 - `Tone` semantic roles are fixed:
   - `Success` — healthy / running / mark-as-completed.
   - `Danger` — destructive / stop / delete (use only when the action is irreversible or stops the engine).
@@ -406,7 +407,7 @@ egui::ComboBox::from_id_salt("client_combo")
 
 **Why**:
 - The helpers enforce three invariants in one place: (a) the `push_id` wrapping required by `Convention: egui discarded-pass UI must pin widget ids explicitly`, (b) `Button::min_size(...)` instead of `add_sized` per `Convention: localized egui controls must not hard-code label width`, and (c) the visual hierarchy that distinguishes the primary action from secondary chrome. Bypassing the helpers re-introduces all three regression classes at once.
-- The button visual hierarchy is meaningful, not cosmetic. `primary_button` is reserved for the **single most important action on its surface** (Add Torrent on the top bar, Save & Restart on the config panel). Two primary buttons on the same surface defeats the focal-point logic entirely.
+- The button visual hierarchy is meaningful, not cosmetic. `primary_button` is reserved for the **single most important action on its surface** (Add Torrent on the top bar, Save on the config panel). Two primary buttons on the same surface defeats the focal-point logic entirely.
 
 **Fix (convention)**:
 - Prefer `theme::primary_button(ui, id, label)` for a surface's single primary action. If a panel needs two equally-weighted primary actions, redesign the panel — don't double up the styling.
@@ -440,40 +441,49 @@ egui::ComboBox::from_id_salt("client_combo")
 - "I'll just call `ctx().set_visuals(original)` again after painting to reset it." This works if and only if nothing between the two calls panics, returns early, or skips the helper. It also defeats `Arc<Style>` sharing because every paint forces a global write. Use `ui.visuals_mut()` instead — it is structurally impossible to leak.
 - Reading `ui.visuals()` (immutable) and forgetting that mutating the clone has no effect until it is written back through `*ui.visuals_mut() = ...`. The clone-on-write semantics live on `visuals_mut`, not on `visuals`.
 
-### Convention: hero surface owns `CentralPanel`; auxiliaries are resizable `TopBottomPanel`s in strict order
+### Convention: hero surface owns `CentralPanel`; auxiliary panels follow strict order
 
 **What**: The desktop layout in `crates/joal-app/src/ui/mod.rs` follows a fixed Panel order so the torrent table — the app's hero surface — automatically claims all remaining vertical space:
 
 ```rust
 // 1. Top: status + action buttons + table toolbar — content-sized, no resizable
-egui::TopBottomPanel::top("top_panel").show(ctx, |ui| { /* ... */ });
+egui::Panel::top("top_panel").show_inside(ui, |ui| { /* ... */ });
 
 // 2. Bottom telemetry (speed chart + log): resizable with explicit bounds
-egui::TopBottomPanel::bottom("telemetry_panel")
+egui::Panel::bottom("telemetry_panel")
     .resizable(true)
-    .default_height(150.0)
-    .height_range(110.0..=320.0)
-    .show(ctx, |ui| { /* ... */ });
+    .default_size(150.0)
+    .min_size(110.0)
+    .max_size(320.0)
+    .show_inside(ui, |ui| { /* ... */ });
 
 // 3. (optional) Footer status strip: exact height, NOT resizable
-egui::TopBottomPanel::bottom("footer_status").exact_height(24.0).show(ctx, |ui| { /* ... */ });
+egui::Panel::bottom("footer_status").show_inside(ui, |ui| { /* ... */ });
 
-// 4. Central: the torrent table (hero) — claims everything left
-egui::CentralPanel::default().show(ctx, |ui| { /* torrent_table::show(...) */ });
+// 4. Optional right-docked configuration: resizable, registered before Central
+egui::Panel::right("config_panel")
+    .resizable(true)
+    .default_size(380.0)
+    .min_size(340.0)
+    .max_size(480.0)
+    .show_inside(ui, |ui| { /* ... */ });
+
+// 5. Central: the torrent table (hero) — claims everything left
+egui::CentralPanel::default().show_inside(ui, |ui| { /* torrent_table::show(...) */ });
 ```
 
 **Why**:
 - egui assigns space to panels in the order they are registered, and `CentralPanel` takes whatever is left. Declaring `CentralPanel` first or burying the table inside a `BottomPanel` collapses the table to whatever min-size the inner content reports — exactly the symptom the layout rewrite was undoing (PRD: "main UI layout exposes a larger primary table area").
-- The PRD also requires "adjustable panes rather than fixed percentages". `resizable(true) + default_height + height_range` is the contract that satisfies it: the user gets a sensible default and can drag the divider, but the bounds prevent them from accidentally hiding the telemetry or starving the table.
+- The PRD also requires "adjustable panes rather than fixed percentages". `resizable(true) + default_size + min_size/max_size` is the contract that satisfies it: the user gets a sensible default and can drag the divider, but the bounds prevent them from accidentally hiding the telemetry or starving the table.
 - Footer-style strips (status bar, version line) must use `exact_height(...)` and stay non-resizable, otherwise the user can drag them into nothingness and the surface becomes unrecoverable.
 
 **Fix (convention)**:
 - The torrent table — and any future "hero" surface in this app — lives in `CentralPanel`. Do not put the table inside a `BottomPanel` "because it fits there for now".
-- Every auxiliary `TopBottomPanel::bottom(...)` that hosts non-trivial content (chart, log, config, side panel) MUST set `resizable(true)`, `default_height(...)`, and `height_range(min..=max)`. Pick a `min` that keeps the panel's primary widget readable at its smallest and a `max` that still leaves the table ~50% of the window.
+- Resizable telemetry and configuration panels MUST set explicit `default_size`, `min_size`, and `max_size`. Pick a minimum that keeps the primary widget readable and a maximum that still leaves the table about half of the window.
 - Fixed-height strips (footer status, decorative dividers) use `exact_height(...)` and stay non-resizable.
-- Panel registration order is Top → Bottom (telemetry) → Bottom (footer) → Central. If you add a new auxiliary panel, slot it before `CentralPanel`, never after.
+- Panel registration order is Top → Bottom (telemetry) → Bottom (footer) → Right (optional config) → Central. If you add a new auxiliary panel, slot it before `CentralPanel`, never after.
 
 **Anti-patterns**:
 - `egui::CentralPanel::default().show(ctx, |ui| { ui.vertical(|ui| { /* status, table, chart, log */ }) })` — collapses the layout back to a single scroll surface and loses the resize affordance the PRD demands.
-- A `BottomPanel` with `default_height(400.0)` and no `height_range` cap — lets the auxiliary panels swallow the table.
+- A telemetry panel with a large `default_size` and no `max_size` cap — lets auxiliary panels swallow the table.
 - A `resizable(true)` footer status strip — the user can drag it to zero height and lose the engine indicator.

@@ -435,3 +435,55 @@ fn on_tick(inner: &Mutex<Inner>, tick_ms: u64) {
     guard.recompute_speeds();
     guard.accumulate_traffic(tick_ms);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::bandwidth::BandwidthDispatcher;
+    use crate::bandwidth::random_speed::{DownloadSpeedProvider, RandomSpeedProvider};
+    use crate::config::{AppConfiguration, UPLOAD_RATIO_TARGET_DISABLED};
+    use crate::torrent::InfoHash;
+
+    fn test_config() -> AppConfiguration {
+        AppConfiguration {
+            min_upload_rate: 10,
+            max_upload_rate: 10,
+            min_download_rate: 0,
+            max_download_rate: 0,
+            simultaneous_seed: 1,
+            client: "test.client".to_owned(),
+            keep_torrent_with_zero_leechers: true,
+            upload_ratio_target: UPLOAD_RATIO_TARGET_DISABLED,
+            proxy_host: None,
+            proxy_port: None,
+        }
+    }
+
+    #[test]
+    fn update_limits_enables_download_for_registered_unfinished_torrent() {
+        let mut config = test_config();
+        let dispatcher = BandwidthDispatcher::new(
+            Duration::from_secs(1),
+            RandomSpeedProvider::new(&config),
+            DownloadSpeedProvider::new(&config),
+        );
+        let info_hash = InfoHash::from_bytes([42; 20]);
+        dispatcher.register_torrent(info_hash.clone(), 1_000_000, false);
+        dispatcher.update_torrent_peers(info_hash.clone(), 1, 1);
+
+        let initial = dispatcher.snapshot();
+        assert_eq!(initial.download_speeds[&info_hash].bytes_per_second(), 0);
+
+        config.min_download_rate = 20;
+        config.max_download_rate = 20;
+        dispatcher.update_limits(&config);
+        dispatcher.refresh_current_bandwidth();
+
+        let refreshed = dispatcher.snapshot();
+        assert_eq!(
+            refreshed.download_speeds[&info_hash].bytes_per_second(),
+            20_000
+        );
+    }
+}

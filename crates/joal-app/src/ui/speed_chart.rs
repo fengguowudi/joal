@@ -1,63 +1,58 @@
 use std::collections::VecDeque;
 
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Corner, Legend, Line, LineStyle, Plot, PlotPoints};
 
+use super::format::format_speed_kb;
+use super::telemetry::SpeedSample;
 use super::{i18n::Tr, theme};
 
-pub fn show(ui: &mut egui::Ui, speed_history: &VecDeque<(f64, f64)>, t: &Tr) {
-    // No outer panel frame — the chart sits directly on the surrounding
-    // background. The header (label + latest speed) takes one compact row.
-    ui.horizontal_wrapped(|ui| {
-        ui.add(egui::Label::new(
-            egui::RichText::new(t.upload_kbs)
-                .strong()
-                .color(theme::text_primary()),
-        ));
-        if let Some((_, latest_speed)) = speed_history.back() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::metric(
-                    ui,
-                    "latest_upload_speed",
-                    "",
-                    &format!("{:.1} KB/s", latest_speed / 1024.0),
-                    theme::Tone::Accent,
-                );
-            });
-        }
-    });
+pub fn show(
+    ui: &mut egui::Ui,
+    speed_history: &VecDeque<SpeedSample>,
+    download_enabled: bool,
+    t: &Tr,
+) {
+    ui.label(
+        egui::RichText::new(t.speed_history_title)
+            .strong()
+            .color(theme::text_primary()),
+    );
     ui.add_space(4.0);
-
     if speed_history.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(
                 egui::RichText::new(t.waiting_for_speed_data)
                     .small()
-                    .color(theme::text_tertiary()),
+                    .color(theme::text_secondary()),
             );
         });
         return;
     }
 
-    let accent = theme::primary_color();
-
-    let points: Vec<[f64; 2]> = speed_history
+    let upload_points: PlotPoints<'_> = speed_history
         .iter()
-        .map(|&(t, speed)| [t, speed / 1024.0])
-        .collect();
-    let series: PlotPoints<'_> = points.into();
+        .map(|sample| [sample.t, sample.up / 1024.0])
+        .collect::<Vec<_>>()
+        .into();
+    let upload = Line::new(t.upload_kbs, upload_points)
+        .color(theme::primary_color())
+        .width(2.2_f32)
+        .fill(0.0_f32)
+        .fill_alpha(0.15_f32);
+    let download_points: PlotPoints<'_> = speed_history
+        .iter()
+        .map(|sample| [sample.t, sample.down / 1024.0])
+        .collect::<Vec<_>>()
+        .into();
+    let download = Line::new(t.download_kbs, download_points)
+        .color(theme::tone_colors(theme::Tone::Info).fg)
+        .width(2.0_f32)
+        .style(LineStyle::Dashed { length: 6.0 });
 
-    // `Line::fill(y_ref)` shades the area between the curve and the y=ref
-    // baseline using the line's own color, with `fill_alpha` for transparency
-    // — that's the "area chart under a thick blue line" look.
-    let line = Line::new(t.upload_kbs, series)
-        .color(accent)
-        .width(2.2)
-        .fill(0.0)
-        .fill_alpha(0.18);
-
-    Plot::new("speed_chart")
+    let plot = Plot::new("speed_chart")
         .height(ui.available_height().max(80.0))
         .width(ui.available_width())
+        .include_y(0.0)
         .show_axes([false, true])
         .show_grid([false, true])
         .grid_color(theme::divider_color())
@@ -65,7 +60,19 @@ pub fn show(ui: &mut egui::Ui, speed_history: &VecDeque<(f64, f64)>, t: &Tr) {
         .allow_drag(false)
         .allow_zoom(false)
         .allow_scroll(false)
-        .show(ui, |plot_ui| {
-            plot_ui.line(line);
-        });
+        .allow_boxed_zoom(false)
+        .allow_double_click_reset(false)
+        .y_axis_formatter(|mark, _| format_speed_kb(mark.value))
+        .label_formatter(|name, point| format!("{name}\n{}", format_speed_kb(point.y)));
+    let plot = if download_enabled {
+        plot.legend(Legend::default().position(Corner::LeftTop))
+    } else {
+        plot
+    };
+    plot.show(ui, |plot_ui| {
+        plot_ui.line(upload);
+        if download_enabled {
+            plot_ui.line(download);
+        }
+    });
 }

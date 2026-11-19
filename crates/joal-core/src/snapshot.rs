@@ -17,15 +17,16 @@
 //! dispatcher (per-torrent upload counters + speeds) in one critical section
 //! before publishing. Consumers never observe half-joined state.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::torrent::InfoHash;
 
 /// One frame of the engine's externally-visible state.
 ///
-/// Cloning is `O(torrent_count)` — about 200 bytes per torrent on 64-bit
-/// targets — which is the cost the [`tokio::sync::watch`] channel pays on
-/// every publish. Sized for 10–100 torrents in the common case.
+/// Cloning shares the per-torrent collection through [`Arc`], so watch
+/// consumers do not deep-copy every [`TorrentStatus`] when cloning a frame.
+/// Only frame-level fields, including the active client filename, are cloned.
 #[derive(Clone, Debug, Default)]
 pub struct EngineSnapshot {
     /// Filename of the active `.client` (e.g. `qbittorrent-4.5.0.client`).
@@ -41,8 +42,9 @@ pub struct EngineSnapshot {
     pub global_download_speed_bps: u64,
 
     /// One entry per live announcer, ordered as returned by the orchestrator
-    /// (insertion order).
-    pub torrents: Vec<TorrentStatus>,
+    /// (insertion order). Shared between snapshot clones; slice access via
+    /// `Deref` keeps read-only consumers unchanged.
+    pub torrents: Arc<[TorrentStatus]>,
 }
 
 /// Live state for a single seeding torrent.

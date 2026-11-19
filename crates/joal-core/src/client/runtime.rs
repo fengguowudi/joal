@@ -22,8 +22,8 @@
 //! Java resolves the public IP by polling third-party HTTP "what-is-my-ip"
 //! providers and refreshes every 90 minutes. The Rust side implements the same
 //! behaviour via [`fetch_public_ip`] which tries multiple providers in random
-//! order. The [`SeedManager`][crate::seed_manager] spawns a background task
-//! that periodically refreshes the IP.
+//! order. The engine fetches once during startup; [`spawn_ip_refresher`]
+//! provides periodic refresh but is currently not wired into the engine.
 
 use std::io;
 use std::net::{IpAddr, TcpListener};
@@ -124,13 +124,15 @@ impl ConnectionHandler {
 
 /// Fetch the public IP from one of the well-known providers.
 /// Tries providers in random order until one succeeds.
-/// Optionally uses a proxy for the HTTP requests.
+/// Optionally uses a proxy for the HTTP requests. Each provider request has a
+/// five-second timeout, and the complete provider sequence is capped at 15
+/// seconds.
 pub async fn fetch_public_ip(proxy_url: Option<&str>) -> Option<IpAddr> {
     let mut providers: Vec<&str> = IP_PROVIDERS.to_vec();
     providers.shuffle(&mut rand::thread_rng());
 
     let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(5))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36");
 
     if let Some(url) = proxy_url
@@ -147,37 +149,54 @@ pub async fn fetch_public_ip(proxy_url: Option<&str>) -> Option<IpAddr> {
         }
     };
 
-    for provider in providers {
-        info!(target: "joal_core::connection_handler", provider, "fetching IP");
-        match client.get(provider).send().await {
-            Ok(resp) => {
-                if let Ok(body) = resp.text().await {
-                    let trimmed = body.trim();
-                    if let Ok(ip) = trimmed.parse::<IpAddr>() {
-                        info!(
-                            target: "joal_core::connection_handler",
-                            ip = %ip,
-                            "successfully fetched public IP"
-                        );
-                        return Some(ip);
+    match tokio::time::timeout(Duration::from_secs(15), async {
+        for provider in providers {
+            info!(target: "joal_core::connection_handler", provider, "fetching IP");
+            match client.get(provider).send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.text().await {
+                        let trimmed = body.trim();
+                        if let Ok(ip) = trimmed.parse::<IpAddr>() {
+                            info!(
+                                target: "joal_core::connection_handler",
+                                ip = %ip,
+                                "successfully fetched public IP"
+                            );
+                            return Some(ip);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                warn!(
-                    target: "joal_core::connection_handler",
-                    provider,
-                    error = %e,
-                    "failed to fetch IP from provider"
-                );
+                Err(e) => {
+                    warn!(
+                        target: "joal_core::connection_handler",
+                        provider,
+                        error = %e,
+                        "failed to fetch IP from provider"
+                    );
+                }
             }
         }
+        None
+    })
+    .await
+    {
+        Ok(ip) => ip,
+        Err(error) => {
+            warn!(
+                target: "joal_core::connection_handler",
+                error = %error,
+                "public IP fetch timed out"
+            );
+            None
+        }
     }
-    None
 }
 
 /// Spawns a background task that periodically fetches the public IP and
 /// updates the shared `ConnectionHandler`. Returns the task handle.
+///
+/// This helper is currently not wired into `SeedManager`; startup performs a
+/// single fetch through [`fetch_public_ip`].
 pub fn spawn_ip_refresher(
     connection: Arc<Mutex<ConnectionHandler>>,
     proxy_url: Option<String>,

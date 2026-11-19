@@ -1,7 +1,9 @@
 use std::hash::Hash;
 
 use egui::{
-    Button, Color32, CornerRadius, Frame, Label, Margin, Response, RichText, Shadow, Stroke, Ui,
+    Button, Color32, CornerRadius,
+    FontFamily::{Monospace, Proportional},
+    FontId, Frame, Label, Margin, Response, RichText, Shadow, Stroke, TextStyle, Ui,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,15 +20,19 @@ pub(super) enum Tone {
 pub(super) struct ToneColors {
     pub fg: Color32,
     pub bg: Color32,
-    /// Kept for API stability — visual edges are intentionally transparent so
-    /// content blocks lean on background contrast instead of 1px borders.
-    #[allow(dead_code)]
-    pub stroke: Color32,
 }
 
 pub(super) fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::light();
+    style.text_styles = [
+        (TextStyle::Small, FontId::new(12.0, Proportional)),
+        (TextStyle::Body, FontId::new(14.0, Proportional)),
+        (TextStyle::Button, FontId::new(14.0, Proportional)),
+        (TextStyle::Heading, FontId::new(18.0, Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+    ]
+    .into();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
     style.spacing.interact_size.y = 30.0;
@@ -38,7 +44,7 @@ pub(super) fn apply(ctx: &egui::Context) {
     visuals.weak_text_color = Some(text_tertiary());
     visuals.hyperlink_color = primary_color();
     visuals.selection.bg_fill = Color32::from_rgb(219, 234, 254);
-    visuals.selection.stroke = Stroke::new(1.0, primary_color());
+    visuals.selection.stroke = Stroke::new(1.0_f32, primary_color());
     visuals.faint_bg_color = panel_fill();
     visuals.extreme_bg_color = surface();
     visuals.text_edit_bg_color = Some(surface());
@@ -48,7 +54,7 @@ pub(super) fn apply(ctx: &egui::Context) {
     visuals.window_corner_radius = CornerRadius::same(CR_PANEL);
     visuals.menu_corner_radius = CornerRadius::same(CR_INSET);
     visuals.window_fill = surface();
-    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(230, 235, 241));
+    visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(230, 235, 241));
     visuals.panel_fill = app_background();
     visuals.popup_shadow.blur = 16;
     visuals.window_shadow.blur = 16;
@@ -58,36 +64,31 @@ pub(super) fn apply(ctx: &egui::Context) {
     visuals.widgets.noninteractive.weak_bg_fill = panel_fill();
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(CR_INSET);
-    // All five widget states pin `fg_stroke.color` to `text_primary()` (dark
-    // slate-900). `WidgetVisuals::fg_stroke.color` is what `TextEdit` paints
-    // its actual content with (after falling through `override_text_color`)
-    // and what unhovered `ComboBox` dropdown items use — leaving any of these
-    // at the egui default (a near-white in `Visuals::dark()`, or a slate-gray
-    // mid-tone in `Visuals::light()`) would render TextEdit content and
-    // dropdown items as washed-out / invisible on our white `surface()` fill.
+    // Pin every widget state's foreground so TextEdit content and ComboBox
+    // items stay legible on the light surfaces.
     visuals.widgets.noninteractive.fg_stroke.color = text_primary();
 
     visuals.widgets.inactive.bg_fill = surface();
     visuals.widgets.inactive.weak_bg_fill = panel_fill();
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, soft_border());
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, soft_border());
     visuals.widgets.inactive.corner_radius = CornerRadius::same(CR_INSET);
     visuals.widgets.inactive.fg_stroke.color = text_primary();
 
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(241, 245, 249);
     visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(241, 245, 249);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225));
     visuals.widgets.hovered.corner_radius = CornerRadius::same(CR_INSET);
     visuals.widgets.hovered.fg_stroke.color = text_primary();
 
     visuals.widgets.active.bg_fill = Color32::from_rgb(226, 232, 240);
     visuals.widgets.active.weak_bg_fill = Color32::from_rgb(226, 232, 240);
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225));
     visuals.widgets.active.corner_radius = CornerRadius::same(CR_INSET);
     visuals.widgets.active.fg_stroke.color = text_primary();
 
     visuals.widgets.open.bg_fill = Color32::from_rgb(241, 245, 249);
     visuals.widgets.open.weak_bg_fill = Color32::from_rgb(241, 245, 249);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225));
     visuals.widgets.open.corner_radius = CornerRadius::same(CR_INSET);
     visuals.widgets.open.fg_stroke.color = text_primary();
 
@@ -116,10 +117,10 @@ pub(super) fn text_secondary() -> Color32 {
     Color32::from_rgb(71, 85, 105)
 }
 
-/// Light-gray, used for auxiliary metadata (timestamps, "Interval ...",
-/// client filenames).
+/// Slate-500 auxiliary metadata text. Use on white or `panel_fill()`, where
+/// it meets the contrast target; do not use it on `app_background()`.
 pub(super) fn text_tertiary() -> Color32 {
-    Color32::from_rgb(156, 163, 175)
+    Color32::from_rgb(100, 116, 139)
 }
 
 pub(super) fn soft_border() -> Color32 {
@@ -170,7 +171,7 @@ pub(super) fn panel_frame() -> Frame {
 pub(super) fn window_frame() -> Frame {
     Frame::new()
         .fill(surface())
-        .stroke(Stroke::new(1.0, soft_border()))
+        .stroke(Stroke::new(1.0_f32, soft_border()))
         .corner_radius(CornerRadius::same(CR_PANEL))
         .inner_margin(Margin::same(12))
         .shadow(Shadow {
@@ -230,11 +231,8 @@ pub(super) fn badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
     });
 }
 
-/// Larger, status-strip-grade badge: leads with a colored dot indicator and a
-/// non-`small()` label so the engine status reads at the same weight as the
-/// "uptime" / runtime metric sitting next to it. Used by `top_bar_status` and
-/// `bottom_bar` for the engine `running` / `stopped` indicator. Standard
-/// `badge` stays compact for inline use elsewhere.
+/// Larger, status-strip-grade badge with a painted status dot and a body-size
+/// label. Painting the dot avoids font-dependent glyph metrics and baselines.
 pub(super) fn engine_badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
     let colors = tone_colors(tone);
     ui.push_id(id, |ui| {
@@ -246,55 +244,15 @@ pub(super) fn engine_badge(ui: &mut Ui, id: impl Hash, text: &str, tone: Tone) {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    // Inline status dot — `\u{25CF}` (BLACK CIRCLE) glyph sized
-                    // up so it visually weighs the same as the label and the
-                    // adjacent uptime text. Wrapped in its own push_id so the
-                    // dot's auto-generated rect cannot drift between passes if
-                    // the label width changes.
                     ui.push_id("engine_badge_dot", |ui| {
-                        ui.add(Label::new(
-                            RichText::new("\u{25CF}").size(14.0).color(colors.fg),
-                        ));
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 4.0, colors.fg);
                     });
                     ui.push_id("engine_badge_label", |ui| {
                         ui.add(
                             Label::new(RichText::new(text).color(colors.fg).strong()).truncate(),
-                        );
-                    });
-                });
-            });
-    });
-}
-
-pub(super) fn metric(ui: &mut Ui, id: impl Hash, label: &str, value: &impl ToString, tone: Tone) {
-    let colors = tone_colors(tone);
-    let value = value.to_string();
-    ui.push_id(id, |ui| {
-        Frame::new()
-            .fill(colors.bg)
-            .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(CR_INSET))
-            .inner_margin(Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if !label.is_empty() {
-                        ui.push_id("metric_label", |ui| {
-                            ui.add(
-                                Label::new(RichText::new(label).small().color(text_secondary()))
-                                    .truncate(),
-                            );
-                        });
-                    }
-                    ui.push_id("metric_value", |ui| {
-                        ui.add(
-                            Label::new(RichText::new(value).strong().color(
-                                if matches!(tone, Tone::Neutral) {
-                                    text_primary()
-                                } else {
-                                    colors.fg
-                                },
-                            ))
-                            .truncate(),
                         );
                     });
                 });
@@ -307,34 +265,116 @@ pub(super) fn tone_colors(tone: Tone) -> ToneColors {
         Tone::Neutral => ToneColors {
             fg: text_primary(),
             bg: Color32::from_rgb(244, 246, 250),
-            stroke: Color32::TRANSPARENT,
         },
         Tone::Accent => ToneColors {
             fg: Color32::from_rgb(37, 99, 235),
             bg: Color32::from_rgb(239, 246, 255),
-            stroke: Color32::TRANSPARENT,
         },
         Tone::Info => ToneColors {
             fg: Color32::from_rgb(14, 116, 144),
             bg: Color32::from_rgb(236, 253, 255),
-            stroke: Color32::TRANSPARENT,
         },
         Tone::Success => ToneColors {
-            fg: Color32::from_rgb(22, 163, 74),
+            fg: Color32::from_rgb(21, 128, 61),
             bg: Color32::from_rgb(240, 253, 244),
-            stroke: Color32::TRANSPARENT,
         },
         Tone::Warning => ToneColors {
-            fg: Color32::from_rgb(217, 119, 6),
+            fg: Color32::from_rgb(180, 83, 9),
             bg: Color32::from_rgb(255, 251, 235),
-            stroke: Color32::TRANSPARENT,
         },
         Tone::Danger => ToneColors {
-            fg: Color32::from_rgb(220, 38, 38),
+            fg: Color32::from_rgb(185, 28, 28),
             bg: Color32::from_rgb(254, 242, 242),
-            stroke: Color32::TRANSPARENT,
         },
     }
+}
+
+#[derive(Clone, Copy)]
+struct ButtonPalette {
+    rest: Color32,
+    hover: Color32,
+    press: Color32,
+    fg: Color32,
+    border: Stroke,
+}
+
+fn secondary_palette() -> ButtonPalette {
+    ButtonPalette {
+        rest: surface(),
+        hover: Color32::from_rgb(241, 245, 249),
+        press: Color32::from_rgb(226, 232, 240),
+        fg: text_primary(),
+        border: Stroke::new(1.0_f32, soft_border()),
+    }
+}
+
+/// Linear channel interpolation used by selected tone buttons for their hover
+/// and pressed fills.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    fn channel(a: u8, b: u8, t: f32) -> u8 {
+        (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8
+    }
+
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgba_unmultiplied(
+        channel(a.r(), b.r(), t),
+        channel(a.g(), b.g(), t),
+        channel(a.b(), b.b(), t),
+        channel(a.a(), b.a(), t),
+    )
+}
+
+/// Draw a 2px keyboard-focus indicator without adding a border to the button
+/// itself. Other focusable controls can reuse this helper with their radius.
+pub(super) fn focus_ring(ui: &Ui, response: &Response, radius: u8) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            CornerRadius::same(radius + 2),
+            Stroke::new(2.0_f32, primary_color()),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+fn themed_button(
+    ui: &mut Ui,
+    id: impl Hash,
+    text: &str,
+    min_size: egui::Vec2,
+    enabled: bool,
+    palette: ButtonPalette,
+) -> Response {
+    ui.push_id(id, |ui| {
+        // A scoped style override keeps state colors local to this button. In
+        // particular, primary white foregrounds never leak into later widgets.
+        ui.scope(|ui| {
+            let widgets = &mut ui.visuals_mut().widgets;
+            for (state, fill) in [
+                (&mut widgets.inactive, palette.rest),
+                (&mut widgets.hovered, palette.hover),
+                (&mut widgets.active, palette.press),
+            ] {
+                state.weak_bg_fill = fill;
+                state.bg_fill = fill;
+                state.bg_stroke = palette.border;
+                state.fg_stroke.color = palette.fg;
+                state.expansion = 0.0;
+            }
+
+            let response = ui.add_enabled(
+                enabled,
+                Button::new(RichText::new(text).color(palette.fg))
+                    .truncate()
+                    .corner_radius(CornerRadius::same(CR_INSET))
+                    .min_size(min_size),
+            );
+            focus_ring(ui, &response, CR_INSET);
+            response
+        })
+        .inner
+    })
+    .inner
 }
 
 /// Render a high-emphasis primary button (solid accent fill, white text, no
@@ -350,10 +390,7 @@ pub(super) fn primary_button(
     primary_button_enabled(ui, id, text, min_size, true)
 }
 
-/// Same as [`primary_button`] but lets the caller gate the enabled state. We
-/// keep the visual structure (push_id + `Button::min_size`) identical to the
-/// always-on path so toggling enabled does not destabilize widget ids across
-/// multi-pass frames.
+/// Same as [`primary_button`] but lets the caller gate the enabled state.
 pub(super) fn primary_button_enabled(
     ui: &mut Ui,
     id: impl Hash,
@@ -361,50 +398,20 @@ pub(super) fn primary_button_enabled(
     min_size: egui::Vec2,
     enabled: bool,
 ) -> Response {
-    ui.push_id(id, |ui| {
-        let bg = primary_color();
-        let bg_hover = Color32::from_rgb(29, 78, 216);
-        let bg_active = Color32::from_rgb(30, 64, 175);
-        let label = RichText::new(text).strong().color(Color32::WHITE);
-        let button = Button::new(label)
-            .truncate()
-            .fill(bg)
-            .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(CR_INSET))
-            .min_size(min_size);
-
-        // Override widget visuals on the SCOPED child Ui (via
-        // `ui.visuals_mut()`) so hover/active also stay on a single primary
-        // hue (no light-gray hover bleed-through). An earlier revision used
-        // `ui.ctx().set_visuals(...)`, which mutates the global Context style
-        // and therefore persists across frames — once the primary button
-        // painted once, every subsequent `TextEdit` and unhovered ComboBox
-        // dropdown item would render white because
-        // `widgets.inactive.fg_stroke.color` had been clobbered to
-        // `Color32::WHITE` for the button's own text. Using `visuals_mut()`
-        // inside a `scope` keeps the override local to this child Ui (the
-        // child's `Arc<Style>` is cloned on write and dropped when the scope
-        // ends), so the parent Ui — and every later frame — still see the
-        // dark widget text colors set in `theme::apply`.
-        ui.scope(|ui| {
-            let visuals = ui.visuals_mut();
-            visuals.widgets.inactive.bg_fill = bg;
-            visuals.widgets.inactive.weak_bg_fill = bg;
-            visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-            visuals.widgets.inactive.fg_stroke.color = Color32::WHITE;
-            visuals.widgets.hovered.bg_fill = bg_hover;
-            visuals.widgets.hovered.weak_bg_fill = bg_hover;
-            visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-            visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-            visuals.widgets.active.bg_fill = bg_active;
-            visuals.widgets.active.weak_bg_fill = bg_active;
-            visuals.widgets.active.bg_stroke = Stroke::NONE;
-            visuals.widgets.active.fg_stroke.color = Color32::WHITE;
-            ui.add_enabled(enabled, button)
-        })
-        .inner
-    })
-    .inner
+    themed_button(
+        ui,
+        id,
+        text,
+        min_size,
+        enabled,
+        ButtonPalette {
+            rest: primary_color(),
+            hover: Color32::from_rgb(29, 78, 216),
+            press: Color32::from_rgb(30, 64, 175),
+            fg: Color32::WHITE,
+            border: Stroke::NONE,
+        },
+    )
 }
 
 /// Render a secondary (default) button — white surface, soft gray border,
@@ -426,19 +433,31 @@ pub(super) fn secondary_button_enabled(
     min_size: egui::Vec2,
     enabled: bool,
 ) -> Response {
-    ui.push_id(id, |ui| {
-        let label = RichText::new(text).strong().color(text_primary());
-        ui.add_enabled(
-            enabled,
-            Button::new(label)
-                .truncate()
-                .fill(surface())
-                .stroke(Stroke::new(1.0, soft_border()))
-                .corner_radius(CornerRadius::same(CR_INSET))
-                .min_size(min_size),
-        )
-    })
-    .inner
+    themed_button(ui, id, text, min_size, enabled, secondary_palette())
+}
+
+/// Borderless secondary button for compact inline actions. It retains the
+/// standard secondary hover/press feedback and the common focus ring.
+pub(super) fn quiet_secondary_button(
+    ui: &mut Ui,
+    id: impl Hash,
+    text: &str,
+    min_size: egui::Vec2,
+) -> Response {
+    themed_button(
+        ui,
+        id,
+        text,
+        min_size,
+        true,
+        ButtonPalette {
+            rest: Color32::TRANSPARENT,
+            hover: Color32::from_rgb(241, 245, 249),
+            press: Color32::from_rgb(226, 232, 240),
+            fg: text_secondary(),
+            border: Stroke::NONE,
+        },
+    )
 }
 
 /// Render a secondary button tinted with a tone color (used for engine
@@ -464,27 +483,92 @@ pub(super) fn tone_button_enabled(
     selected: bool,
     enabled: bool,
 ) -> Response {
-    ui.push_id(id, |ui| {
+    let palette = if selected {
         let colors = tone_colors(tone);
-        // Soft tinted background with strong colored text; no border.
-        let bg = if selected { colors.bg } else { surface() };
-        let fg = if selected { colors.fg } else { text_primary() };
-        let stroke = if selected {
-            Stroke::NONE
-        } else {
-            Stroke::new(1.0, soft_border())
+        ButtonPalette {
+            rest: colors.bg,
+            hover: mix(colors.bg, colors.fg, 0.08),
+            press: mix(colors.bg, colors.fg, 0.16),
+            fg: colors.fg,
+            border: Stroke::NONE,
+        }
+    } else {
+        secondary_palette()
+    };
+    themed_button(ui, id, text, min_size, enabled, palette)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn button_helpers_do_not_overlap_in_right_to_left_layout() {
+        let ctx = egui::Context::default();
+        let mut rects = Vec::new();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                rects.push(secondary_button(ui, "one", "EN", egui::vec2(56.0, 30.0)).rect);
+                rects.push(
+                    tone_button(
+                        ui,
+                        "two",
+                        "Stop",
+                        Tone::Danger,
+                        egui::vec2(96.0, 30.0),
+                        true,
+                    )
+                    .rect,
+                );
+                rects.push(primary_button(ui, "three", "Add", egui::vec2(124.0, 30.0)).rect);
+            });
+        });
+        assert!(
+            rects.windows(2).all(|pair| !pair[0].intersects(pair[1])),
+            "{rects:?}"
+        );
+        assert!(
+            rects[0].max.x > rects[1].max.x && rects[1].max.x > rects[2].max.x,
+            "{rects:?}"
+        );
+    }
+
+    #[test]
+    fn action_group_fits_a_960px_surface() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
         };
-        ui.add_enabled(
-            enabled,
-            Button::new(RichText::new(text).strong().color(fg))
-                .truncate()
-                .fill(bg)
-                .stroke(stroke)
-                .corner_radius(CornerRadius::same(CR_INSET))
-                .selected(selected)
-                .frame_when_inactive(true)
-                .min_size(min_size),
-        )
-    })
-    .inner
+        let mut rects = Vec::new();
+        let _ = ctx.run_ui(input, |ui| {
+            egui::Panel::top("test_top").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Running  0 B/s");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for (id, label, width) in [
+                            ("language", "EN", 56.0),
+                            ("engine", "Stop", 96.0),
+                            ("config", "Config", 96.0),
+                            ("announce", "Announce Now", 132.0),
+                            ("add", "Add Torrent", 124.0),
+                        ] {
+                            rects.push(
+                                secondary_button(ui, id, label, egui::vec2(width, 30.0)).rect,
+                            );
+                        }
+                    });
+                });
+            });
+        });
+        assert!(
+            rects.iter().all(|rect| screen.contains_rect(*rect)),
+            "{rects:?}"
+        );
+        assert!(
+            rects.windows(2).all(|pair| !pair[0].intersects(pair[1])),
+            "{rects:?}"
+        );
+    }
 }

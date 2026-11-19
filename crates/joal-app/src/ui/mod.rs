@@ -1,265 +1,181 @@
 mod config_panel;
 mod config_state;
+mod format;
+mod health;
 pub mod i18n;
 mod log_panel;
 mod speed_chart;
 mod status_bar;
+mod telemetry;
 mod theme;
 mod torrent_table;
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 use joal_core::config::{AppConfiguration, JoalFolders};
 use joal_core::events::EngineEvent;
-use joal_core::snapshot::EngineSnapshot;
 use joal_core::torrent::InfoHash;
-use tokio::sync::{broadcast, mpsc, watch};
 use tracing::warn;
 
-use crate::{EngineCommand, EngineResponse};
-use config_state::{ConfigEditState, ConfigNotice, ConfigValidationIssue};
-use i18n::{Language, tr};
-
-const LOG_BUFFER_CAPACITY: usize = 500;
-const SPEED_HISTORY_CAPACITY: usize = 300;
+use crate::engine::{EngineCommand, EngineErrorKind, EngineLink, EnginePhase, UiMessage};
+use config_state::ConfigPanelState;
+use i18n::{Language, Tr, tr};
+use telemetry::Telemetry;
 
 pub fn configure_visuals(ctx: &egui::Context) {
     theme::apply(ctx);
 }
 
-pub struct LogEntry {
-    pub timestamp: Instant,
-    pub message: String,
-}
-
-/// State for the delete-confirmation dialog.
-struct DeleteConfirmation {
+struct ArchiveConfirmation {
     info_hash: InfoHash,
     name: String,
+    just_opened: bool,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+struct Banner {
+    kind: EngineErrorKind,
+    detail: String,
+}
+
 pub struct JoalApp {
-    snapshot_rx: watch::Receiver<EngineSnapshot>,
-    events_rx: broadcast::Receiver<EngineEvent>,
-    started_at: Instant,
-    current_snapshot: EngineSnapshot,
-    log_buffer: VecDeque<LogEntry>,
-    speed_history: VecDeque<(f64, f64)>,
-    log_auto_scroll: bool,
-
-    // Command/response channels
-    cmd_tx: mpsc::Sender<EngineCommand>,
-    resp_rx: mpsc::Receiver<EngineResponse>,
-    #[allow(dead_code)]
-    folders: Arc<JoalFolders>,
-
-    // Engine state tracking
-    engine_running: bool,
-
-    // Config editor state
-    show_config_panel: bool,
-    config_edit: ConfigEditState,
-    config_validation_errors: Vec<ConfigValidationIssue>,
-    config_operation_error: Option<String>,
-    config_notice: Option<ConfigNotice>,
-    config_apply_in_progress: bool,
-    available_clients: Vec<String>,
-    clients_requested: bool,
-    table_state: torrent_table::TableState,
-
-    // Delete confirmation
-    pending_delete: Option<DeleteConfirmation>,
-
-    // Language
+    engine: EngineLink,
+    telemetry: Telemetry,
+    table: torrent_table::TableState,
+    config: ConfigPanelState,
+    pending_archive: Option<ArchiveConfirmation>,
+    banner: Option<Banner>,
     language: Language,
 }
 
 impl JoalApp {
     pub fn new(
-        snapshot_rx: watch::Receiver<EngineSnapshot>,
-        events_rx: broadcast::Receiver<EngineEvent>,
-        started_at: Instant,
-        cmd_tx: mpsc::Sender<EngineCommand>,
-        resp_rx: mpsc::Receiver<EngineResponse>,
-        folders: Arc<JoalFolders>,
+        engine: EngineLink,
+        folders: &JoalFolders,
+        storage: Option<&dyn eframe::Storage>,
     ) -> Self {
-        let current_snapshot = snapshot_rx.borrow().clone();
-        // Load initial config from disk so the config panel shows real values.
-        let initial_config = load_config_sync(&folders);
-        let config_edit =
-            ConfigEditState::from_snapshot(&current_snapshot, initial_config.as_ref());
+        let snapshot = engine.snapshot_rx.borrow().clone();
+        let initial_config = load_config_sync(folders);
+        let mut table = torrent_table::TableState::default();
+        table.on_snapshot(&snapshot);
+        let language = storage
+            .and_then(|storage| storage.get_string("language"))
+            .and_then(|code| Language::from_code(&code))
+            .unwrap_or_else(system_language);
+        let config = ConfigPanelState::new(&snapshot, initial_config.as_ref());
         Self {
-            snapshot_rx,
-            events_rx,
-            started_at,
-            current_snapshot,
-            log_buffer: VecDeque::with_capacity(LOG_BUFFER_CAPACITY),
-            speed_history: VecDeque::with_capacity(SPEED_HISTORY_CAPACITY),
-            log_auto_scroll: true,
-            cmd_tx,
-            resp_rx,
-            folders,
-            engine_running: true,
-            show_config_panel: false,
-            config_edit,
-            config_validation_errors: Vec::new(),
-            config_operation_error: None,
-            config_notice: None,
-            config_apply_in_progress: false,
-            available_clients: Vec::new(),
-            clients_requested: false,
-            table_state: torrent_table::TableState::default(),
-            pending_delete: None,
-            language: Language::default(),
+            telemetry: Telemetry::new(snapshot, initial_config.as_ref()),
+            config,
+            engine,
+            table,
+            pending_archive: None,
+            banner: None,
+            language,
         }
     }
 
-    fn poll_snapshot(&mut self) -> bool {
-        if self.snapshot_rx.has_changed().unwrap_or(false) {
-            self.current_snapshot = self.snapshot_rx.borrow_and_update().clone();
-            let elapsed = self.started_at.elapsed().as_secs_f64();
-            let speed = self.current_snapshot.global_upload_speed_bps as f64;
-            self.speed_history.push_back((elapsed, speed));
-            if self.speed_history.len() > SPEED_HISTORY_CAPACITY {
-                self.speed_history.pop_front();
+    fn on_message(&mut self, message: UiMessage) {
+        match message {
+            UiMessage::Phase(phase) => {
+                self.telemetry.on_phase(phase);
+                if phase == EnginePhase::Running
+                    && self
+                        .banner
+                        .as_ref()
+                        .is_some_and(|banner| banner.kind == EngineErrorKind::Start)
+                {
+                    self.banner = None;
+                }
             }
-            true
-        } else {
-            false
-        }
-    }
-
-    fn drain_events(&mut self) {
-        loop {
-            match self.events_rx.try_recv() {
-                Ok(event) => {
-                    // Track engine state from events
-                    match &event {
-                        EngineEvent::GlobalSeedStarted { .. } => {
-                            self.engine_running = true;
-                        }
-                        EngineEvent::GlobalSeedStopped => {
-                            self.engine_running = false;
-                        }
-                        EngineEvent::ConfigLoaded { config } => {
-                            self.config_edit = ConfigEditState::from_snapshot(
-                                &self.current_snapshot,
-                                Some(config),
-                            );
-                            self.config_validation_errors.clear();
-                            self.config_operation_error = None;
-                            self.config_apply_in_progress = false;
-                        }
-                        _ => {}
-                    }
-                    let message = format_event(&event);
-                    self.log_buffer.push_back(LogEntry {
-                        timestamp: Instant::now(),
-                        message,
-                    });
-                    if self.log_buffer.len() > LOG_BUFFER_CAPACITY {
-                        self.log_buffer.pop_front();
-                    }
+            UiMessage::Event(event) => {
+                if let EngineEvent::ConfigLoaded { config } = &event {
+                    self.config.on_config(&self.telemetry.snapshot, config);
                 }
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    self.log_buffer.push_back(LogEntry {
-                        timestamp: Instant::now(),
-                        message: format!("[warning] event bus lagged, {n} events dropped"),
-                    });
-                    if self.log_buffer.len() > LOG_BUFFER_CAPACITY {
-                        self.log_buffer.pop_front();
-                    }
-                }
-                Err(
-                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
-                ) => break,
+                self.telemetry.on_event(event);
             }
-        }
-    }
-
-    fn drain_responses(&mut self) {
-        while let Ok(resp) = self.resp_rx.try_recv() {
-            match resp {
-                EngineResponse::ClientList(clients) => {
-                    self.available_clients = clients;
-                }
-                EngineResponse::Stopped => {
-                    self.engine_running = false;
-                }
-                EngineResponse::Started {
-                    snapshot_rx,
-                    events_rx,
-                } => {
-                    self.snapshot_rx = snapshot_rx;
-                    self.events_rx = events_rx;
-                    self.engine_running = true;
-                }
-                EngineResponse::ConfigApplied => {
-                    self.config_validation_errors.clear();
-                    self.config_operation_error = None;
-                    self.config_notice = Some(ConfigNotice::SavedAndRestarted);
-                    self.config_apply_in_progress = false;
-                }
-                EngineResponse::Error(msg) => {
-                    self.log_buffer.push_back(LogEntry {
-                        timestamp: Instant::now(),
-                        message: format!("[error] {msg}"),
-                    });
-                    if self.log_buffer.len() > LOG_BUFFER_CAPACITY {
-                        self.log_buffer.pop_front();
-                    }
-                    if self.config_apply_in_progress {
-                        self.config_apply_in_progress = false;
-                        self.config_notice = None;
-                        self.config_operation_error = Some(msg);
-                    }
+            UiMessage::EventsLagged(count) => self.telemetry.on_lagged(count),
+            UiMessage::Clients(clients) => self.config.clients = clients,
+            UiMessage::ConfigApplied { restarted } => self.config.on_applied(restarted),
+            UiMessage::Error { kind, detail } => {
+                self.telemetry.on_error(kind, detail.clone());
+                if matches!(
+                    kind,
+                    EngineErrorKind::SaveConfig | EngineErrorKind::RestartAfterConfig
+                ) {
+                    self.config.open = true;
+                    self.config.on_error(detail);
+                } else {
+                    self.banner = Some(Banner { kind, detail });
                 }
             }
         }
     }
 
-    fn send_command(&self, cmd: EngineCommand) {
-        if let Err(error) = self.cmd_tx.try_send(cmd) {
+    fn send_command(&self, command: EngineCommand) {
+        if let Err(error) = self.engine.cmd_tx.try_send(command) {
             warn!(%error, "failed to enqueue UI command");
         }
     }
-}
 
-impl eframe::App for JoalApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let changed = self.poll_snapshot();
-        self.drain_events();
-        self.drain_responses();
-
-        // Request client list once
-        if !self.clients_requested {
-            self.clients_requested = true;
-            self.send_command(EngineCommand::ListClients);
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let files = ctx.input(|input| input.raw.dropped_files.clone());
+        let mut ignored = 0_usize;
+        for file in files {
+            let is_torrent = file.path.as_ref().is_some_and(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
+            });
+            if is_torrent {
+                if let Some(path) = file.path {
+                    self.send_command(EngineCommand::AddTorrent(path));
+                }
+            } else {
+                ignored += 1;
+            }
         }
-
-        if changed {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        if ignored > 0 {
+            self.telemetry.on_dropped_files(ignored);
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let t = tr(self.language);
-        self.draw_top_panel(ui, t);
-        self.draw_footer(ui, t);
-        self.draw_telemetry_panel(ui, t);
-        self.draw_config_window(ui, t);
-        self.draw_delete_confirmation(ui, t);
-        self.draw_central_table(ui, t);
+    fn handle_table_action(&mut self, action: torrent_table::TableAction) {
+        match action {
+            torrent_table::TableAction::Sort(column) => {
+                self.table.toggle_sort(column, &self.telemetry.snapshot);
+            }
+            torrent_table::TableAction::ToggleCompleted {
+                info_hash,
+                completed,
+            } => self.send_command(EngineCommand::SetTorrentInitialCompleted {
+                info_hash,
+                completed,
+            }),
+            torrent_table::TableAction::RequestArchive { info_hash, name } => {
+                self.pending_archive = Some(ArchiveConfirmation {
+                    info_hash,
+                    name,
+                    just_opened: true,
+                });
+            }
+            torrent_table::TableAction::AddTorrent => self.pick_and_add_torrents(),
+            torrent_table::TableAction::ClearFilters => {
+                self.table.clear_filters(&self.telemetry.snapshot);
+            }
+        }
     }
-}
 
-impl JoalApp {
-    fn draw_top_panel(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
+    fn pick_and_add_torrents(&self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Torrent files", &["torrent"])
+            .pick_files()
+        {
+            for path in paths {
+                self.send_command(EngineCommand::AddTorrent(path));
+            }
+        }
+    }
+
+    fn draw_top_panel(&mut self, ui: &mut egui::Ui, t: &Tr) {
         egui::Panel::top("top_panel")
             .frame(theme::strip_frame(theme::surface()))
             .show_inside(ui, |ui| {
@@ -267,174 +183,20 @@ impl JoalApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
-                torrent_table::toolbar(ui, &self.current_snapshot, &mut self.table_state, t);
+                torrent_table::toolbar(ui, &self.telemetry.snapshot, &mut self.table, t);
+                self.draw_banner(ui, t);
             });
     }
 
-    fn draw_footer(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        egui::Panel::bottom("footer_status")
-            .frame(theme::strip_frame(theme::surface()))
-            .show_inside(ui, |ui| {
-                status_bar::bottom_bar(
-                    ui,
-                    &self.current_snapshot,
-                    self.started_at,
-                    self.engine_running,
-                    t,
-                );
-            });
-    }
-
-    fn draw_telemetry_panel(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        egui::Panel::bottom("telemetry_panel")
-            .resizable(true)
-            .default_size(150.0)
-            .min_size(110.0)
-            .max_size(320.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::app_background())
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
-            .show_inside(ui, |ui| {
-                self.draw_log_panel(ui, t);
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    speed_chart::show(ui, &self.speed_history, t);
-                });
-            });
-    }
-
-    fn draw_log_panel(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        egui::Panel::right("log_panel")
-            .resizable(true)
-            .default_size(420.0)
-            .min_size(260.0)
-            .show_inside(ui, |ui| {
-                log_panel::show(
-                    ui,
-                    &self.log_buffer,
-                    &mut self.log_auto_scroll,
-                    self.started_at,
-                    t,
-                );
-            });
-    }
-
-    fn draw_config_window(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        let mut show_config_window = self.show_config_panel;
-        if show_config_window {
-            let response = self.show_config_window(ui, &mut show_config_window, t);
-            self.handle_config_window_response(response);
-        }
-        self.show_config_panel = show_config_window;
-    }
-
-    fn show_config_window(
-        &mut self,
-        ui: &mut egui::Ui,
-        show_config_window: &mut bool,
-        t: &i18n::Tr,
-    ) -> Option<config_panel::ConfigPanelAction> {
-        egui::Window::new(t.configuration)
-            .id(egui::Id::new("config_window"))
-            .open(show_config_window)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(egui::vec2(420.0, 560.0))
-            .min_width(360.0)
-            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 64.0])
-            .frame(theme::window_frame())
-            .show(ui.ctx(), |ui| {
-                config_panel::show(
-                    ui,
-                    &mut self.config_edit,
-                    config_panel::ConfigPanelView {
-                        validation_errors: &self.config_validation_errors,
-                        operation_error: self.config_operation_error.as_deref(),
-                        notice: self.config_notice,
-                        apply_in_progress: self.config_apply_in_progress,
-                        available_clients: &self.available_clients,
-                        t,
-                    },
-                )
-            })
-            .and_then(|r| r.inner)
-    }
-
-    fn handle_config_window_response(&mut self, response: Option<config_panel::ConfigPanelAction>) {
-        let Some(inner) = response else { return };
-        if inner.edited {
-            self.config_validation_errors.clear();
-            self.config_operation_error = None;
-            self.config_notice = None;
-        }
-        if inner.apply_requested {
-            self.apply_edited_config();
-        }
-    }
-
-    fn apply_edited_config(&mut self) {
-        match self.config_edit.validated_config(&self.available_clients) {
-            Ok(config) => {
-                self.config_validation_errors.clear();
-                self.config_operation_error = None;
-                self.config_notice = None;
-                self.config_apply_in_progress = true;
-                self.send_command(EngineCommand::ApplyConfig(config));
-            }
-            Err(errors) => {
-                self.config_validation_errors = errors;
-                self.config_operation_error = None;
-                self.config_notice = None;
-                self.config_apply_in_progress = false;
-            }
-        }
-    }
-
-    fn draw_delete_confirmation(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        let mut close_dialog = false;
-        let mut do_delete: Option<InfoHash> = None;
-        if let Some(confirm) = &self.pending_delete {
-            show_delete_window(ui, t, confirm, &mut close_dialog, &mut do_delete);
-        }
-        if let Some(hash) = do_delete {
-            self.send_command(EngineCommand::DeleteTorrent(hash));
-        }
-        if close_dialog {
-            self.pending_delete = None;
-        }
-    }
-
-    fn draw_central_table(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::app_background())
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
-            .show_inside(ui, |ui| {
-                theme::panel_frame().show(ui, |ui| {
-                    torrent_table::show(
-                        ui,
-                        &mut self.current_snapshot,
-                        &mut self.pending_delete,
-                        &self.cmd_tx,
-                        &mut self.table_state,
-                        t,
-                    );
-                });
-            });
-    }
-}
-
-impl JoalApp {
-    /// First row of the top panel: status badges/metrics on the left, action
-    /// buttons + language toggle pushed to the right edge. Keeping these in a
-    /// single row is what frees up the vertical space the central table
-    /// claims.
-    fn draw_top_status_row(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
+    fn draw_top_status_row(&mut self, ui: &mut egui::Ui, t: &Tr) {
         ui.horizontal(|ui| {
-            status_bar::top_bar_status(ui, &self.current_snapshot, self.engine_running, t);
+            status_bar::top_bar_status(
+                ui,
+                &self.telemetry.snapshot,
+                self.telemetry.phase,
+                self.telemetry.download_enabled,
+                t,
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.draw_language_toggle(ui);
                 self.draw_engine_toggle(ui, t);
@@ -450,7 +212,7 @@ impl JoalApp {
             ui,
             "language_toggle_button",
             self.language.toggle().label(),
-            egui::vec2(64.0, 30.0),
+            egui::vec2(56.0, 30.0),
         )
         .clicked()
         {
@@ -458,24 +220,27 @@ impl JoalApp {
         }
     }
 
-    fn draw_engine_toggle(&self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        let label = if self.engine_running { t.stop } else { t.start };
-        let tone = if self.engine_running {
-            theme::Tone::Danger
-        } else {
-            theme::Tone::Success
+    fn draw_engine_toggle(&self, ui: &mut egui::Ui, t: &Tr) {
+        let phase = self.telemetry.phase;
+        let (label, tone, enabled) = match phase {
+            EnginePhase::Starting => (t.starting, theme::Tone::Info, false),
+            EnginePhase::Stopping => (t.stopping, theme::Tone::Info, false),
+            EnginePhase::Running => (t.stop, theme::Tone::Danger, true),
+            EnginePhase::Stopped => (t.start, theme::Tone::Success, true),
+            EnginePhase::Failed => (t.retry, theme::Tone::Success, true),
         };
-        if theme::tone_button(
+        if theme::tone_button_enabled(
             ui,
             "engine_toggle_button",
             label,
             tone,
-            egui::vec2(86.0, 30.0),
+            egui::vec2(96.0, 30.0),
             true,
+            enabled,
         )
         .clicked()
         {
-            self.send_command(if self.engine_running {
+            self.send_command(if phase == EnginePhase::Running {
                 EngineCommand::Stop
             } else {
                 EngineCommand::Start
@@ -483,8 +248,8 @@ impl JoalApp {
         }
     }
 
-    fn draw_config_toggle(&mut self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        let label = if self.show_config_panel {
+    fn draw_config_toggle(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        let label = if self.config.open {
             t.hide_config
         } else {
             t.config
@@ -494,25 +259,25 @@ impl JoalApp {
             "config_panel_toggle_button",
             label,
             theme::Tone::Accent,
-            egui::vec2(104.0, 30.0),
-            self.show_config_panel,
+            egui::vec2(96.0, 30.0),
+            self.config.open,
         )
         .clicked()
         {
-            self.show_config_panel = !self.show_config_panel;
-            if self.show_config_panel {
+            self.config.open = !self.config.open;
+            if self.config.open {
                 self.send_command(EngineCommand::ListClients);
             }
         }
     }
 
-    fn draw_announce_button(&self, ui: &mut egui::Ui, t: &i18n::Tr) {
+    fn draw_announce_button(&self, ui: &mut egui::Ui, t: &Tr) {
         if theme::secondary_button_enabled(
             ui,
             "announce_all_button",
             t.announce_all_now,
-            egui::vec2(140.0, 30.0),
-            self.engine_running,
+            egui::vec2(132.0, 30.0),
+            self.telemetry.phase == EnginePhase::Running,
         )
         .clicked()
         {
@@ -520,127 +285,281 @@ impl JoalApp {
         }
     }
 
-    fn draw_add_torrent_button(&self, ui: &mut egui::Ui, t: &i18n::Tr) {
-        if !theme::primary_button(
+    fn draw_add_torrent_button(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        if theme::primary_button(
             ui,
             "add_torrent_button",
             t.add_torrent,
-            egui::vec2(118.0, 30.0),
+            egui::vec2(124.0, 30.0),
         )
         .clicked()
         {
+            self.pick_and_add_torrents();
+        }
+    }
+
+    fn draw_banner(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        let Some(banner) = &self.banner else {
+            return;
+        };
+        let mut dismiss = false;
+        let mut retry = false;
+        theme::tone_frame(theme::Tone::Danger).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = telemetry::error_kind_text(banner.kind, t);
+                let text = if banner.detail.is_empty() {
+                    label.to_owned()
+                } else {
+                    format!("{label}: {}", banner.detail)
+                };
+                ui.add(egui::Label::new(egui::RichText::new(&text)).truncate())
+                    .on_hover_ui(|ui| {
+                        ui.label(&text);
+                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    dismiss = theme::quiet_secondary_button(
+                        ui,
+                        "dismiss_error_banner",
+                        t.dismiss,
+                        egui::vec2(56.0, 26.0),
+                    )
+                    .clicked();
+                    if banner.kind == EngineErrorKind::Start {
+                        retry = theme::secondary_button(
+                            ui,
+                            "retry_start",
+                            t.retry,
+                            egui::vec2(72.0, 26.0),
+                        )
+                        .clicked();
+                    }
+                });
+            });
+        });
+        if dismiss {
+            self.banner = None;
+        }
+        if retry {
+            self.banner = None;
+            self.send_command(EngineCommand::Start);
+        }
+    }
+
+    fn draw_telemetry_panel(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        egui::Panel::bottom("telemetry_panel")
+            .resizable(true)
+            .default_size(150.0)
+            .min_size(110.0)
+            .max_size(320.0)
+            .frame(theme::strip_frame(theme::surface()))
+            .show_inside(ui, |ui| {
+                egui::Panel::right("log_panel")
+                    .resizable(true)
+                    .default_size(420.0)
+                    .min_size(260.0)
+                    .show_inside(ui, |ui| {
+                        log_panel::show(
+                            ui,
+                            &self.telemetry.logs,
+                            &mut self.telemetry.log_auto_scroll,
+                            &mut self.telemetry.problems_only,
+                            t,
+                        );
+                    });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    speed_chart::show(
+                        ui,
+                        &self.telemetry.speed_history,
+                        self.telemetry.download_enabled,
+                        t,
+                    );
+                });
+            });
+    }
+
+    fn draw_footer(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        egui::Panel::bottom("footer_status")
+            .frame(theme::strip_frame(theme::surface()))
+            .show_inside(ui, |ui| {
+                status_bar::bottom_bar(
+                    ui,
+                    &self.telemetry.snapshot,
+                    self.telemetry.started_at,
+                    self.telemetry.total_uploaded,
+                    t,
+                );
+            });
+    }
+
+    fn draw_config_panel(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        if !self.config.open {
             return;
         }
-        if let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Torrent files", &["torrent"])
-            .pick_files()
+        let action = egui::Panel::right("config_panel")
+            .resizable(true)
+            .default_size(380.0)
+            .min_size(340.0)
+            .max_size(480.0)
+            .frame(theme::strip_frame(theme::surface()))
+            .show_inside(ui, |ui| {
+                ui.heading(t.configuration);
+                egui::ScrollArea::vertical()
+                    .show(ui, |ui| config_panel::show(ui, &mut self.config, t))
+            })
+            .inner
+            .inner;
+        if action.edited {
+            self.config.on_edited();
+        }
+        if action.apply_requested
+            && let Some(config) = self.config.begin_apply()
         {
-            for path in paths {
-                self.send_command(EngineCommand::AddTorrent(path));
-            }
+            self.send_command(EngineCommand::ApplyConfig(config));
+        }
+    }
+
+    fn draw_archive_confirmation(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        let Some(confirmation) = &self.pending_archive else {
+            return;
+        };
+        let mut close = false;
+        let mut archive = None;
+        let modal = egui::Modal::new(egui::Id::new("archive_confirmation"))
+            .frame(theme::window_frame())
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(t.archive_title);
+                ui.add(egui::Label::new(&confirmation.name).truncate())
+                    .on_hover_ui(|ui| {
+                        ui.label(&confirmation.name);
+                    });
+                ui.label(egui::RichText::new(t.archive_hint).color(theme::text_secondary()));
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::tone_button(
+                        ui,
+                        "confirm_archive_button",
+                        t.archive_confirm,
+                        theme::Tone::Danger,
+                        egui::vec2(96.0, 30.0),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        archive = Some(confirmation.info_hash.clone());
+                        close = true;
+                    }
+                    let cancel = theme::secondary_button(
+                        ui,
+                        "cancel_archive_button",
+                        t.cancel,
+                        egui::vec2(80.0, 30.0),
+                    );
+                    if confirmation.just_opened {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if let Some(info_hash) = archive {
+            self.send_command(EngineCommand::ArchiveTorrent(info_hash));
+        }
+        if close {
+            self.pending_archive = None;
+        } else if let Some(confirmation) = &mut self.pending_archive {
+            confirmation.just_opened = false;
+        }
+    }
+
+    fn draw_central_table(&mut self, ui: &mut egui::Ui, t: &Tr) {
+        let action = egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::app_background())
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show_inside(ui, |ui| {
+                let available = ui.available_rect_before_wrap();
+                let action = theme::panel_frame()
+                    .show(ui, |ui| {
+                        torrent_table::show(
+                            ui,
+                            &self.telemetry.snapshot,
+                            &self.table,
+                            torrent_table::TableView {
+                                download_enabled: self.telemetry.download_enabled,
+                                phase: self.telemetry.phase,
+                            },
+                            t,
+                        )
+                    })
+                    .inner;
+                if ui.ctx().input(|input| !input.raw.hovered_files.is_empty()) {
+                    ui.painter().rect_filled(
+                        available,
+                        egui::CornerRadius::same(theme::CR_PANEL),
+                        theme::primary_color().gamma_multiply(0.08),
+                    );
+                    ui.painter().text(
+                        available.center(),
+                        egui::Align2::CENTER_CENTER,
+                        t.drop_overlay,
+                        egui::TextStyle::Heading.resolve(ui.style()),
+                        theme::primary_color(),
+                    );
+                }
+                action
+            })
+            .inner;
+        if let Some(action) = action {
+            self.handle_table_action(action);
         }
     }
 }
 
-fn show_delete_window(
-    ui: &mut egui::Ui,
-    t: &i18n::Tr,
-    confirm: &DeleteConfirmation,
-    close_dialog: &mut bool,
-    do_delete: &mut Option<InfoHash>,
-) {
-    let name = confirm.name.clone();
-    let hash = confirm.info_hash.clone();
-    egui::Window::new(t.confirm_delete)
-        .id(egui::Id::new("delete_confirmation_window"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(theme::window_frame())
-        .show(ui.ctx(), |ui| {
-            ui.label(format!("{} \"{name}\"?", t.delete_prompt));
-            ui.label(t.delete_hint);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if theme::tone_button(
-                    ui,
-                    "confirm_delete_button",
-                    t.delete,
-                    theme::Tone::Danger,
-                    egui::vec2(96.0, 30.0),
-                    true,
-                )
-                .clicked()
-                {
-                    *do_delete = Some(hash.clone());
-                    *close_dialog = true;
-                }
-                if theme::secondary_button(
-                    ui,
-                    "cancel_delete_button",
-                    t.cancel,
-                    egui::vec2(80.0, 30.0),
-                )
-                .clicked()
-                {
-                    *close_dialog = true;
-                }
-            });
-        });
+impl eframe::App for JoalApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(message) = self.engine.msg_rx.try_recv() {
+            self.on_message(message);
+        }
+        if self.engine.snapshot_rx.has_changed().unwrap_or(false) {
+            let snapshot = self.engine.snapshot_rx.borrow_and_update().clone();
+            self.telemetry.on_snapshot(snapshot);
+            self.table.on_snapshot(&self.telemetry.snapshot);
+        }
+        self.handle_dropped_files(ctx);
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let t = tr(self.language);
+        self.draw_top_panel(ui, t);
+        self.draw_telemetry_panel(ui, t);
+        self.draw_footer(ui, t);
+        self.draw_config_panel(ui, t);
+        self.draw_central_table(ui, t);
+        self.draw_archive_confirmation(ui, t);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("language", self.language.code().to_owned());
+    }
 }
 
-/// Load `config.json` synchronously for UI initialization. Returns `None` on
-/// any I/O or parse error — the config panel will fall back to defaults.
 fn load_config_sync(folders: &JoalFolders) -> Option<AppConfiguration> {
-    let path = folders.config_file();
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = std::fs::read(folders.config_file()).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-fn format_event(event: &EngineEvent) -> String {
-    match event {
-        EngineEvent::GlobalSeedStarted { client_name } => {
-            format!("Seeding started - client: {client_name}")
-        }
-        EngineEvent::GlobalSeedStopped => "Seeding stopped".to_owned(),
-        EngineEvent::TorrentFileAdded { name, .. } => {
-            format!("Torrent added: {name}")
-        }
-        EngineEvent::TorrentFileDeleted { name, .. } => {
-            format!("Torrent removed: {name}")
-        }
-        EngineEvent::FailedToAddTorrentFile { name, reason } => {
-            format!("Failed to add torrent {name}: {reason}")
-        }
-        EngineEvent::TooManyAnnouncesFailedInARow { name, .. } => {
-            format!("Too many failures: {name}")
-        }
-        EngineEvent::AnnounceStarted {
-            name, tracker_url, ..
-        } => {
-            format!("Announcing: {name} -> {tracker_url}")
-        }
-        EngineEvent::AnnounceSucceeded {
-            name,
-            seeders,
-            leechers,
-            interval,
-            ..
-        } => {
-            format!("Announce OK: {name} (S:{seeders} L:{leechers} I:{interval}s)")
-        }
-        EngineEvent::AnnounceFailed { name, error, .. } => {
-            format!("Announce FAILED: {name} - {error}")
-        }
-        EngineEvent::ConfigLoaded { config } => {
-            format!(
-                "Config loaded - client: {}, upload: {}-{} kB/s, download: {}-{} kB/s",
-                config.client,
-                config.min_upload_rate,
-                config.max_upload_rate,
-                config.min_download_rate,
-                config.max_download_rate,
-            )
-        }
+fn system_language() -> Language {
+    if sys_locale::get_locale().is_some_and(|locale| locale.starts_with("zh")) {
+        Language::Chinese
+    } else {
+        Language::English
     }
 }

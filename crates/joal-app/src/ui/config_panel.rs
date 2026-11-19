@@ -1,36 +1,16 @@
+use super::config_state::{ConfigField, ConfigPanelState, ConfigValidationIssue};
 use super::i18n::Tr;
-use super::{ConfigEditState, ConfigNotice, ConfigValidationIssue, theme};
+use super::theme;
 
 pub(super) struct ConfigPanelAction {
     pub apply_requested: bool,
     pub edited: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ConfigPanelView<'a> {
-    pub validation_errors: &'a [ConfigValidationIssue],
-    pub operation_error: Option<&'a str>,
-    pub notice: Option<ConfigNotice>,
-    pub apply_in_progress: bool,
-    pub available_clients: &'a [String],
-    pub t: &'a Tr,
-}
-
-pub fn show(
-    ui: &mut egui::Ui,
-    state: &mut ConfigEditState,
-    view: ConfigPanelView<'_>,
-) -> ConfigPanelAction {
-    let t = view.t;
+pub fn show(ui: &mut egui::Ui, state: &mut ConfigPanelState, t: &Tr) -> ConfigPanelAction {
     let mut edited = false;
-
-    // No body heading here — the `egui::Window::new(t.configuration)` title
-    // bar already shows the same string, so a duplicate body heading would
-    // just stack the word twice at the top of the card. The first inset
-    // frame below provides its own top margin so removing the heading does
-    // not push the form against the title bar.
     theme::inset_frame().show(ui, |ui| {
-        edited |= show_config_grid(ui, state, view.available_clients, t);
+        edited |= show_config_grid(ui, state, t);
     });
     ui.add_space(10.0);
     theme::inset_frame().show(ui, |ui| {
@@ -43,123 +23,153 @@ pub fn show(
         edited |= show_proxy_grid(ui, state, t);
     });
     ui.add_space(10.0);
-    // Hint stays at `text_secondary()` because it is secondary/auxiliary
-    // information that should not compete with the form labels for emphasis.
-    // The helper itself was bumped from slate-500 (`#6B7280`, perceived as
-    // pale on `#FFFFFF`) to slate-600 (`#475569`) — see the doc comment on
-    // `theme::text_secondary()`. All other Window content (Window title bar,
-    // section headings, form labels, checkbox label) uses `text_primary()`.
     ui.label(
         egui::RichText::new(t.tip_ratio)
             .small()
             .color(theme::text_secondary()),
     );
-    ui.add_space(8.0);
-    show_feedback(ui, &view);
 
-    // The "save & restart" button gets a centered, deliberately larger touch
-    // target so it reads as the single primary action of this surface.
-    let apply_requested = ui
+    if state.dirty() && !state.applying {
+        let hint = if state.only_rate_fields_edited() {
+            t.config_apply_live
+        } else {
+            t.config_apply_restart
+        };
+        ui.label(
+            egui::RichText::new(hint)
+                .small()
+                .color(theme::text_secondary()),
+        );
+    }
+    ui.add_space(8.0);
+    show_feedback(ui, state, t);
+
+    let response = ui
         .vertical_centered(|ui| {
             theme::primary_button_enabled(
                 ui,
                 "config_apply_button",
-                t.save_and_restart,
+                t.save,
                 egui::vec2(240.0, 36.0),
-                !view.apply_in_progress,
+                state.dirty() && !state.applying,
             )
-            .clicked()
         })
         .inner;
+    if !state.dirty() {
+        response.clone().on_disabled_hover_text(t.config_no_changes);
+    }
 
     ConfigPanelAction {
-        apply_requested,
+        apply_requested: response.clicked(),
         edited,
     }
 }
 
-fn show_config_grid(
-    ui: &mut egui::Ui,
-    state: &mut ConfigEditState,
-    available_clients: &[String],
-    t: &Tr,
-) -> bool {
+#[allow(clippy::too_many_lines)]
+fn show_config_grid(ui: &mut egui::Ui, state: &mut ConfigPanelState, t: &Tr) -> bool {
     let mut edited = false;
-    // Both `config_grid` and `proxy_grid` share the same `min_col_width` /
-    // `spacing` settings so their left label columns line up vertically across
-    // the two inset frames — otherwise each grid would auto-size its label
-    // column independently and the forms would drift.
+    let issues = &state.issues;
+    let edit = &mut state.edit;
     egui::Grid::new("config_grid")
         .num_columns(2)
         .min_col_width(120.0)
         .spacing([24.0, 12.0])
         .show(ui, |ui| {
             field_label(ui, t.min_upload_rate);
-            edited |= config_text_field(ui, "config_min_upload_rate", &mut state.min_upload_rate)
-                .changed();
+            edited |= config_text_field(
+                ui,
+                "config_min_upload_rate",
+                &mut edit.min_upload_rate,
+                ConfigField::MinUploadRate,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.max_upload_rate);
-            edited |= config_text_field(ui, "config_max_upload_rate", &mut state.max_upload_rate)
-                .changed();
+            edited |= config_text_field(
+                ui,
+                "config_max_upload_rate",
+                &mut edit.max_upload_rate,
+                ConfigField::MaxUploadRate,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.min_download_rate);
-            edited |=
-                config_text_field(ui, "config_min_download_rate", &mut state.min_download_rate)
-                    .changed();
+            edited |= config_text_field(
+                ui,
+                "config_min_download_rate",
+                &mut edit.min_download_rate,
+                ConfigField::MinDownloadRate,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.max_download_rate);
-            edited |=
-                config_text_field(ui, "config_max_download_rate", &mut state.max_download_rate)
-                    .changed();
+            edited |= config_text_field(
+                ui,
+                "config_max_download_rate",
+                &mut edit.max_download_rate,
+                ConfigField::MaxDownloadRate,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.simultaneous_seed);
-            edited |=
-                config_text_field(ui, "config_simultaneous_seed", &mut state.simultaneous_seed)
-                    .changed();
+            edited |= config_text_field(
+                ui,
+                "config_simultaneous_seed",
+                &mut edit.simultaneous_seed,
+                ConfigField::SimultaneousSeed,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.upload_ratio_target);
             edited |= config_text_field(
                 ui,
                 "config_upload_ratio_target",
-                &mut state.upload_ratio_target,
+                &mut edit.upload_ratio_target,
+                ConfigField::UploadRatioTarget,
+                issues,
+                t,
             )
             .changed();
             ui.end_row();
 
             field_label(ui, t.client_label);
-            // Match the text-field width (148px) so the client combo lines up
-            // with the inputs above instead of standing out wider.
-            egui::ComboBox::from_id_salt("client_combo")
-                .width(148.0)
-                .truncate()
-                .selected_text(&state.selected_client)
-                .show_ui(ui, |ui| {
-                    for client in available_clients {
-                        edited |= ui
-                            .selectable_value(&mut state.selected_client, client.clone(), client)
-                            .changed();
-                    }
-                });
+            ui.vertical(|ui| {
+                let response = egui::ComboBox::from_id_salt("client_combo")
+                    .width(148.0)
+                    .truncate()
+                    .selected_text(&edit.selected_client)
+                    .show_ui(ui, |ui| {
+                        for client in &state.clients {
+                            edited |= ui
+                                .selectable_value(&mut edit.selected_client, client.clone(), client)
+                                .changed();
+                        }
+                    });
+                theme::focus_ring(ui, &response.response, theme::CR_INSET);
+                inline_error(ui, ConfigField::Client, issues, t);
+            });
             ui.end_row();
 
-            // Empty left cell — the checkbox row reuses the label slot for the
-            // checkbox itself so clicking the i18n text toggles the value
-            // (previously the label sat in column 1 and was not clickable).
-            // The label is wrapped in an explicit `RichText::new(...).color(
-            // text_primary())` so it picks up the same dark ink as
-            // `field_label` regardless of whether `override_text_color` is
-            // honored by `ui.checkbox`'s internal `WidgetText` path on every
-            // platform.
             ui.label("");
             edited |= ui
                 .push_id("config_keep_zero_leecher", |ui| {
                     ui.checkbox(
-                        &mut state.keep_torrent_with_zero_leechers,
+                        &mut edit.keep_torrent_with_zero_leechers,
                         egui::RichText::new(t.keep_zero_leecher).color(theme::text_primary()),
                     )
                 })
@@ -170,68 +180,88 @@ fn show_config_grid(
     edited
 }
 
-fn show_proxy_grid(ui: &mut egui::Ui, state: &mut ConfigEditState, t: &Tr) -> bool {
+fn show_proxy_grid(ui: &mut egui::Ui, state: &mut ConfigPanelState, t: &Tr) -> bool {
     let mut edited = false;
+    let issues = &state.issues;
+    let edit = &mut state.edit;
     egui::Grid::new("proxy_grid")
         .num_columns(2)
         .min_col_width(120.0)
         .spacing([24.0, 12.0])
         .show(ui, |ui| {
             field_label(ui, t.proxy_host);
-            edited |= config_text_field(ui, "config_proxy_host", &mut state.proxy_host).changed();
+            edited |= config_text_field(
+                ui,
+                "config_proxy_host",
+                &mut edit.proxy_host,
+                ConfigField::ProxyHost,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
 
             field_label(ui, t.proxy_port);
-            edited |= config_text_field(ui, "config_proxy_port", &mut state.proxy_port).changed();
+            edited |= config_text_field(
+                ui,
+                "config_proxy_port",
+                &mut edit.proxy_port,
+                ConfigField::ProxyPort,
+                issues,
+                t,
+            )
+            .changed();
             ui.end_row();
         });
     edited
 }
 
-fn show_feedback(ui: &mut egui::Ui, view: &ConfigPanelView<'_>) {
-    let t = view.t;
-    if !view.validation_errors.is_empty() {
-        let danger = theme::tone_colors(theme::Tone::Danger);
+fn show_feedback(ui: &mut egui::Ui, state: &ConfigPanelState, t: &Tr) {
+    let has_unexpected = state
+        .issues
+        .iter()
+        .any(|issue| matches!(issue, ConfigValidationIssue::Unexpected(_)));
+    if has_unexpected {
         theme::tone_frame(theme::Tone::Danger).show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(t.config_validation_errors)
-                    .strong()
-                    .color(danger.fg),
-            );
-            ui.add_space(4.0);
-            for issue in view.validation_errors {
-                ui.label(egui::RichText::new(format!("• {}", issue.message(t))).color(danger.fg));
+            for issue in &state.issues {
+                if matches!(issue, ConfigValidationIssue::Unexpected(_)) {
+                    ui.label(
+                        egui::RichText::new(issue.message(t))
+                            .color(theme::tone_colors(theme::Tone::Danger).fg),
+                    );
+                }
             }
         });
         ui.add_space(8.0);
     }
-
-    if let Some(message) = view.operation_error {
-        let danger = theme::tone_colors(theme::Tone::Danger);
+    if let Some(message) = &state.operation_error {
         theme::tone_frame(theme::Tone::Danger).show(ui, |ui| {
-            ui.label(egui::RichText::new(message).strong().color(danger.fg));
-        });
-        ui.add_space(8.0);
-    }
-
-    if let Some(notice) = view.notice {
-        let success = theme::tone_colors(theme::Tone::Success);
-        theme::tone_frame(theme::Tone::Success).show(ui, |ui| {
             ui.label(
-                egui::RichText::new(notice.message(t))
+                egui::RichText::new(message)
                     .strong()
-                    .color(success.fg),
+                    .color(theme::tone_colors(theme::Tone::Danger).fg),
             );
         });
         ui.add_space(8.0);
     }
-
-    if view.apply_in_progress {
-        let info = theme::tone_colors(theme::Tone::Info);
+    if let Some(notice) = state.notice {
+        theme::tone_frame(theme::Tone::Success).show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(notice.message(t))
+                    .strong()
+                    .color(theme::tone_colors(theme::Tone::Success).fg),
+            );
+        });
+        ui.add_space(8.0);
+    }
+    if state.applying {
         theme::tone_frame(theme::Tone::Info).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(egui::RichText::new(t.config_apply_in_progress).color(info.fg));
+                ui.label(
+                    egui::RichText::new(t.config_apply_in_progress)
+                        .color(theme::tone_colors(theme::Tone::Info).fg),
+                );
             });
         });
         ui.add_space(8.0);
@@ -239,24 +269,37 @@ fn show_feedback(ui: &mut egui::Ui, view: &ConfigPanelView<'_>) {
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str) {
-    // Form labels intentionally use `text_primary()` (near-black `#111827`,
-    // slate-900) so every label in the Window paints with the same dark ink
-    // regardless of locale. An earlier iteration used `text_secondary()`
-    // (`#6B7280` slate-500), but CJK glyphs at body size on a pure white
-    // `surface()` fill read as washed-out / near-invisible — the raw contrast
-    // number passed WCAG AA but the perceived weight did not. Section
-    // headings and the Window title bar all already use `text_primary()`;
-    // keeping field labels at the same ink keeps the whole form legible
-    // regardless of locale. The hint at the bottom is the only surviving
-    // `text_secondary()` use inside the Window, and that helper is now
-    // slate-600 (see `theme::text_secondary()`).
     ui.label(egui::RichText::new(text).color(theme::text_primary()));
 }
 
-fn config_text_field(ui: &mut egui::Ui, id: &'static str, value: &mut String) -> egui::Response {
-    ui.add(
-        egui::TextEdit::singleline(value)
-            .id_salt(id)
-            .desired_width(148.0),
-    )
+#[allow(clippy::too_many_arguments)]
+fn config_text_field(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    value: &mut String,
+    field: ConfigField,
+    issues: &[ConfigValidationIssue],
+    t: &Tr,
+) -> egui::Response {
+    ui.vertical(|ui| {
+        let response = ui.add(
+            egui::TextEdit::singleline(value)
+                .id_salt(id)
+                .desired_width(148.0),
+        );
+        theme::focus_ring(ui, &response, theme::CR_INSET);
+        inline_error(ui, field, issues, t);
+        response
+    })
+    .inner
+}
+
+fn inline_error(ui: &mut egui::Ui, field: ConfigField, issues: &[ConfigValidationIssue], t: &Tr) {
+    if let Some(issue) = issues.iter().find(|issue| issue.field() == Some(field)) {
+        ui.label(
+            egui::RichText::new(issue.message(t))
+                .small()
+                .color(theme::tone_colors(theme::Tone::Danger).fg),
+        );
+    }
 }

@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "joal-app"
-version = "2.2.4"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1983,7 +1983,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "serde_json",
- "tempfile",
+ "sys-locale",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "joal-core"
-version = "2.2.4"
+version = "2.2.5"
 dependencies = [
  "anyhow",
  "notify",

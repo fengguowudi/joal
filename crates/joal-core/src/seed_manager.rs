@@ -330,6 +330,18 @@ impl SeedManager {
         &self.state_store
     }
 
+    /// Apply rate-limit changes without restarting the announcers.
+    ///
+    /// Immediately re-samples both bandwidth providers and publishes
+    /// [`EngineEvent::ConfigLoaded`]. No tracker announce is triggered.
+    pub fn apply_rate_limits(&self, config: &AppConfiguration) {
+        self.bandwidth.update_limits(config);
+        self.bandwidth.refresh_current_bandwidth();
+        self.events.publish(EngineEvent::ConfigLoaded {
+            config: config.clone(),
+        });
+    }
+
     /// Pull the next regular announce for every live torrent forward to now.
     pub fn announce_all_now(&self) {
         if self
@@ -582,7 +594,7 @@ fn build_snapshot(deps: &MergerDeps) -> EngineSnapshot {
         active_client_filename: deps.active_client_filename.clone(),
         global_upload_speed_bps: global_bps,
         global_download_speed_bps: global_dl_bps,
-        torrents,
+        torrents: torrents.into(),
     }
 }
 

@@ -1,154 +1,106 @@
+use std::time::Instant;
+
 use joal_core::snapshot::EngineSnapshot;
 
+use crate::engine::EnginePhase;
+
+use super::format::{format_bytes, format_speed};
 use super::{i18n::Tr, theme};
 
-/// Render the top status strip: engine badge + upload/download/torrent count
-/// metrics on the left.
-///
-/// Buttons are intentionally NOT rendered here — `mod.rs` adds them in the
-/// same row using a `right_to_left` layout so the top strip stays a single
-/// height-efficient line. The function does NOT call `ui.horizontal()` —
-/// callers wrap it in whatever layout they need (the main app embeds it in a
-/// horizontal layout shared with action buttons).
-pub fn top_bar_status(ui: &mut egui::Ui, snapshot: &EngineSnapshot, engine_running: bool, t: &Tr) {
-    let attention_count = snapshot
-        .torrents
-        .iter()
-        .filter(|torrent| torrent.consecutive_fails > 0 || torrent.last_known_leechers == Some(0))
-        .count();
-    let zero_leecher_count = snapshot
-        .torrents
-        .iter()
-        .filter(|torrent| torrent.last_known_leechers == Some(0))
-        .count();
+pub fn top_bar_status(
+    ui: &mut egui::Ui,
+    snapshot: &EngineSnapshot,
+    phase: EnginePhase,
+    download_enabled: bool,
+    t: &Tr,
+) {
+    let (label, tone) = match phase {
+        EnginePhase::Starting | EnginePhase::Stopping => (
+            if phase == EnginePhase::Starting {
+                t.starting
+            } else {
+                t.stopping
+            },
+            theme::Tone::Info,
+        ),
+        EnginePhase::Running => (t.running, theme::Tone::Success),
+        EnginePhase::Stopped => (t.stopped, theme::Tone::Neutral),
+        EnginePhase::Failed => (t.failed, theme::Tone::Danger),
+    };
+    theme::engine_badge(ui, "engine_state", label, tone);
+    if matches!(phase, EnginePhase::Starting | EnginePhase::Stopping) {
+        ui.spinner();
+    }
+    speed_readout(ui, true, snapshot.global_upload_speed_bps);
+    if download_enabled {
+        speed_readout(ui, false, snapshot.global_download_speed_bps);
+    }
+}
 
-    // Engine status uses the larger `engine_badge` (colored status dot + label
-    // at body-text size) so it visually anchors next to the upload/download
-    // metrics rather than reading as a tiny pill.
-    theme::engine_badge(
-        ui,
-        "engine_state",
-        if engine_running { t.running } else { t.stopped },
-        if engine_running {
-            theme::Tone::Success
+fn speed_readout(ui: &mut egui::Ui, upload: bool, bytes_per_sec: u64) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        let center = rect.center();
+        let points = if upload {
+            vec![
+                center + egui::vec2(-4.0, 3.0),
+                center + egui::vec2(4.0, 3.0),
+                center + egui::vec2(0.0, -4.0),
+            ]
         } else {
-            theme::Tone::Danger
-        },
-    );
-    theme::metric(
-        ui,
-        "global_upload_speed",
-        "▲",
-        &format_speed(snapshot.global_upload_speed_bps),
-        theme::Tone::Accent,
-    );
-    theme::metric(
-        ui,
-        "global_download_speed",
-        "▼",
-        &format_speed(snapshot.global_download_speed_bps),
-        theme::Tone::Info,
-    );
-    theme::metric(
-        ui,
-        "torrent_count",
-        t.torrents,
-        &snapshot.torrents.len(),
-        theme::Tone::Neutral,
-    );
-    theme::metric(
-        ui,
-        "attention_count",
-        t.attention,
-        &attention_count,
-        if attention_count > 0 {
-            theme::Tone::Warning
+            vec![
+                center + egui::vec2(-4.0, -3.0),
+                center + egui::vec2(4.0, -3.0),
+                center + egui::vec2(0.0, 4.0),
+            ]
+        };
+        let color = if upload {
+            theme::primary_color()
         } else {
-            theme::Tone::Success
-        },
-    );
-    theme::metric(
-        ui,
-        "zero_leechers_count",
-        t.zero_leechers,
-        &zero_leecher_count,
-        if zero_leecher_count > 0 {
-            theme::Tone::Warning
-        } else {
-            theme::Tone::Neutral
-        },
-    );
+            theme::tone_colors(theme::Tone::Info).fg
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
+        ui.label(egui::RichText::new(format_speed(bytes_per_sec)).color(theme::text_primary()));
+    });
 }
 
 pub fn bottom_bar(
     ui: &mut egui::Ui,
     snapshot: &EngineSnapshot,
-    started_at: std::time::Instant,
-    engine_running: bool,
+    started_at: Instant,
+    total_uploaded: u64,
     t: &Tr,
 ) {
     ui.horizontal(|ui| {
         let elapsed = started_at.elapsed().as_secs();
-        let h = elapsed / 3600;
-        let m = (elapsed % 3600) / 60;
-        let s = elapsed % 60;
-
-        theme::engine_badge(
-            ui,
-            "engine_status_footer",
-            if engine_running { t.running } else { t.stopped },
-            if engine_running {
-                theme::Tone::Success
-            } else {
-                theme::Tone::Danger
-            },
+        let uptime = format!(
+            "{:02}:{:02}:{:02}",
+            elapsed / 3600,
+            (elapsed % 3600) / 60,
+            elapsed % 60
         );
-        theme::metric(
-            ui,
-            "uptime_footer",
-            t.uptime,
-            &format!("{h:02}:{m:02}:{s:02}"),
-            theme::Tone::Neutral,
+        ui.label(
+            egui::RichText::new(format!(
+                "{} {} · {} {uptime}",
+                t.client, snapshot.active_client_filename, t.uptime
+            ))
+            .small()
+            .color(theme::text_secondary()),
         );
-
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Active client filename — light gray, low emphasis, sits at the
-            // far right corner like a "powered by" tag.
-            ui.push_id("active_client_footer", |ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&snapshot.active_client_filename)
-                            .small()
-                            .color(theme::text_tertiary()),
-                    )
-                    .truncate(),
-                )
-                .on_hover_text(&snapshot.active_client_filename);
-            });
-            theme::metric(
-                ui,
-                "torrent_count_footer",
-                t.torrents,
-                &snapshot.torrents.len(),
-                theme::Tone::Neutral,
-            );
-            theme::metric(
-                ui,
-                "global_upload_speed_footer",
-                "▲",
-                &format_speed(snapshot.global_upload_speed_bps),
-                theme::Tone::Accent,
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} {}",
+                    t.uploaded_total,
+                    format_bytes(total_uploaded)
+                ))
+                .color(theme::text_primary()),
             );
         });
     });
-}
-
-pub fn format_speed(bytes_per_sec: u64) -> String {
-    if bytes_per_sec >= 1_048_576 {
-        format!("{:.1} MB/s", bytes_per_sec as f64 / 1_048_576.0)
-    } else if bytes_per_sec >= 1024 {
-        format!("{:.1} KB/s", bytes_per_sec as f64 / 1024.0)
-    } else {
-        format!("{bytes_per_sec} B/s")
-    }
 }

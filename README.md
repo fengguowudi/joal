@@ -107,21 +107,24 @@ cargo clippy --all-targets
 │                                                     │
 │  main() ─┬─ parse Args (--joal-conf)               │
 │           ├─ init tracing                           │
-│           ├─ spawn tokio runtime on background thread│
-│           ├─ SeedManager::start() on that runtime   │
+│           ├─ engine::spawn(supervisor)              │
 │           └─ eframe::run_native(JoalApp)            │
 │                                                     │
+│  engine.rs supervisor                               │
+│    ├─ 唯一持有 Option<SeedManager>                  │
+│    ├─ 稳定 watch<EngineSnapshot> 输出               │
+│    └─ mpsc<UiMessage>：阶段、事件、错误、客户端      │
+│                                                     │
 │  JoalApp (eframe::App)                              │
-│    ├─ snapshot_rx: watch::Receiver<EngineSnapshot>  │
-│    ├─ events_rx: broadcast::Receiver<EngineEvent>   │
-│    ├─ cmd_tx → EngineCommand channel → tokio runtime│
-│    └─ update() → poll snapshot + events → render    │
+│    ├─ logic()：收消息 → 更新 Telemetry / 表格模型    │
+│    └─ ui()：只读快照 → 绘制 → 发送 EngineCommand     │
 └─────────────────────────────────────────────────────┘
 ```
 
 - **tokio runtime** 在独立 OS 线程运行，负责所有异步 I/O（HTTP announce、文件 watcher）
-- **eframe** 占据主线程事件循环，每帧非阻塞 poll 状态变化
-- 两者通过 `watch`/`broadcast`/`mpsc` channel 通信
+- 引擎由监督任务在后台启动，与窗口打开并行；启动中、启动失败和重试都通过 UI 阶段消息呈现
+- **eframe** 占据主线程事件循环，每帧非阻塞收取快照与监督消息
+- 监督任务与 UI 通过稳定的 `watch` / `mpsc` channel 通信，核心事件只在监督任务内从 `broadcast` 转发
 
 ## License
 
